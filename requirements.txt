@@ -7,7 +7,13 @@ customtkinter>=5.2.0
 # HTTP Requests
 requests>=2.28.0
 urllib3>=1.26.0
+certifi>=2022.12.7
+charset-normalizer>=2.1.0
+idna>=3.4
 
-# Data handling (optional, for future analytics)
+# Database (for SQL Server connection)
+pyodbc>=4.0.35
+
+# Optional: Data handling for future analytics
 # pandas>=1.5.0
 # matplotlib>=3.6.0

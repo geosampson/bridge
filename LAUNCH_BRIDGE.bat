@@ -4,7 +4,7 @@ color 0A
 
 echo =========================================
 echo   BRIDGE - Product Management System
-echo   WooCommerce & Capital ERP Integration
+echo   WooCommerce ^& Capital ERP Integration
 echo =========================================
 echo.
 
@@ -18,8 +18,9 @@ if errorlevel 1 (
 )
 
 echo Checking dependencies...
+echo.
 
-REM Install required packages if needed
+REM Check and install required packages
 pip show customtkinter >nul 2>&1
 if errorlevel 1 (
     echo Installing customtkinter...
@@ -32,6 +33,20 @@ if errorlevel 1 (
     pip install requests
 )
 
+pip show urllib3 >nul 2>&1
+if errorlevel 1 (
+    echo Installing urllib3...
+    pip install urllib3
+)
+
+pip show pyodbc >nul 2>&1
+if errorlevel 1 (
+    echo Installing pyodbc...
+    pip install pyodbc
+)
+
+echo.
+echo All dependencies installed!
 echo.
 echo Starting BRIDGE application...
 echo.
@@ -41,6 +56,9 @@ python bridge_app.py
 
 if errorlevel 1 (
     echo.
+    echo ==========================================
     echo Application exited with an error.
+    echo Please check INSTALLATION.md for help.
+    echo ==========================================
     pause
 )
