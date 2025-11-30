@@ -255,6 +255,34 @@ class WooCommerceClient:
             
         return all_categories
         
+    def get_product_variations(self, product_id):
+        """Get all variations for a variable product"""
+        all_variations = []
+        page = 1
+        per_page = 100
+        
+        while True:
+            url = f"{self.store_url}/wp-json/wc/v3/products/{product_id}/variations"
+            params = {"per_page": per_page, "page": page}
+            try:
+                response = requests.get(url, auth=self.auth, params=params, timeout=30)
+                response.raise_for_status()
+                variations = response.json()
+                
+                if not variations:
+                    break
+                all_variations.extend(variations)
+                
+                total_pages = int(response.headers.get('X-WP-TotalPages', 1))
+                if page >= total_pages:
+                    break
+                page += 1
+            except:
+                # Product doesn't have variations or error occurred
+                break
+                
+        return all_variations
+        
     def update_product(self, product_id, data):
         """Update a product on WooCommerce"""
         url = f"{self.store_url}/wp-json/wc/v3/products/{product_id}"
@@ -770,17 +798,17 @@ class BridgeApp(ctk.CTk):
         self.product_name_filter = ctk.CTkEntry(filter_frame, width=200)
         self.product_name_filter.grid(row=0, column=3, padx=5, pady=5)
         
-        # Category filter
-        ctk.CTkLabel(filter_frame, text="Category:").grid(row=0, column=4, padx=5, pady=5)
+        # Brand filter (parent categories only)
+        ctk.CTkLabel(filter_frame, text="Brand:").grid(row=0, column=4, padx=5, pady=5)
         self.product_category_filter = ctk.CTkComboBox(
             filter_frame, 
             width=180,
-            values=["All Categories"]
+            values=["All Brands"]
         )
         self.product_category_filter.grid(row=0, column=5, padx=5, pady=5)
-        self.product_category_filter.set("All Categories")
+        self.product_category_filter.set("All Brands")
         
-        # Filter button
+          # Filter button
         ctk.CTkButton(
             filter_frame,
             text="🔍 Filter",
@@ -788,13 +816,58 @@ class BridgeApp(ctk.CTk):
             width=100
         ).grid(row=0, column=6, padx=10, pady=5)
         
-        # Clear filter button
+        # Clear button
         ctk.CTkButton(
             filter_frame,
             text="❌ Clear",
             command=self.clear_product_filters,
-            width=80
-        ).grid(row=0, column=7, padx=5, pady=5)
+            width=100
+        ).grid(row=0, column=7, padx=10, pady=5)
+        
+        # Group update frame
+        group_update_frame = ctk.CTkFrame(self.tab_products)
+        group_update_frame.grid(row=0, column=0, sticky="e", padx=10, pady=(50, 0))
+        
+        ctk.CTkLabel(
+            group_update_frame,
+            text="Group Update (Filtered Products):",
+            font=ctk.CTkFont(size=12, weight="bold")
+        ).grid(row=0, column=0, padx=5, pady=5, columnspan=4)
+        
+        # Price update
+        ctk.CTkLabel(group_update_frame, text="Set Price (€):").grid(row=1, column=0, padx=5, pady=5)
+        self.group_price_entry = ctk.CTkEntry(group_update_frame, width=100, placeholder_text="e.g., 29.99")
+        self.group_price_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ctk.CTkButton(
+            group_update_frame,
+            text="💰 Update Prices",
+            command=self.update_group_prices,
+            width=120,
+            fg_color="green"
+        ).grid(row=1, column=2, padx=5, pady=5)
+        
+        # Discount update
+        ctk.CTkLabel(group_update_frame, text="Set Discount (%):").grid(row=2, column=0, padx=5, pady=5)
+        self.group_discount_entry = ctk.CTkEntry(group_update_frame, width=100, placeholder_text="e.g., 15")
+        self.group_discount_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        ctk.CTkButton(
+            group_update_frame,
+            text="🏷️ Apply Discount",
+            command=self.update_group_discount,
+            width=120,
+            fg_color="orange"
+        ).grid(row=2, column=2, padx=5, pady=5)
+        
+        # Sync to Capital button
+        ctk.CTkButton(
+            group_update_frame,
+            text="🔄 Sync to Capital Prices",
+            command=self.sync_filtered_to_capital,
+            width=120,
+            fg_color="blue"
+        ).grid(row=3, column=0, columnspan=3, padx=5, pady=5)
         
         # Products treeview
         tree_frame = ctk.CTkFrame(self.tab_products)
@@ -872,7 +945,7 @@ class BridgeApp(ctk.CTk):
                 continue
             if name_filter and name_filter not in name.lower():
                 continue
-            if category_filter != "All Categories":
+            if category_filter != "All Brands":
                 if category_filter not in categories:
                     continue
                     
@@ -895,8 +968,108 @@ class BridgeApp(ctk.CTk):
         """Clear all product filters"""
         self.product_sku_filter.delete(0, "end")
         self.product_name_filter.delete(0, "end")
-        self.product_category_filter.set("All Categories")
+        self.product_category_filter.set("All Brands")
         self.filter_products()
+        
+    def get_filtered_products(self):
+        """Get list of currently filtered products"""
+        filtered_products = []
+        for item in self.products_tree.get_children():
+            values = self.products_tree.item(item, "values")
+            sku = values[0]
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                filtered_products.append(product)
+        return filtered_products
+        
+    def update_group_prices(self):
+        """Update prices for all filtered products"""
+        price_str = self.group_price_entry.get().strip()
+        if not price_str:
+            messagebox.showwarning("Warning", "Please enter a price")
+            return
+            
+        try:
+            price = float(price_str)
+        except ValueError:
+            messagebox.showerror("Error", "Invalid price format")
+            return
+            
+        filtered_products = self.get_filtered_products()
+        if not filtered_products:
+            messagebox.showwarning("Warning", "No products in current filter")
+            return
+            
+        if not messagebox.askyesno("Confirm", f"Update {len(filtered_products)} filtered products to €{price:.2f}?"):
+            return
+            
+        updates = []
+        for product in filtered_products:
+            updates.append({
+                "id": product['woo_id'],
+                "regular_price": str(price)
+            })
+            
+        threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+        self.group_price_entry.delete(0, "end")
+        
+    def update_group_discount(self):
+        """Apply discount percentage to all filtered products"""
+        discount_str = self.group_discount_entry.get().strip()
+        if not discount_str:
+            messagebox.showwarning("Warning", "Please enter a discount percentage")
+            return
+            
+        try:
+            discount_percent = float(discount_str)
+            if discount_percent < 0 or discount_percent > 100:
+                raise ValueError("Discount must be between 0 and 100")
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid discount: {str(e)}")
+            return
+            
+        filtered_products = self.get_filtered_products()
+        if not filtered_products:
+            messagebox.showwarning("Warning", "No products in current filter")
+            return
+            
+        if not messagebox.askyesno("Confirm", f"Apply {discount_percent}% discount to {len(filtered_products)} filtered products?"):
+            return
+            
+        updates = []
+        for product in filtered_products:
+            regular_price = product.get('woo_regular_price', 0)
+            if regular_price > 0:
+                sale_price = regular_price * (1 - discount_percent / 100)
+                updates.append({
+                    "id": product['woo_id'],
+                    "sale_price": f"{sale_price:.2f}"
+                })
+                
+        threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+        self.group_discount_entry.delete(0, "end")
+        
+    def sync_filtered_to_capital(self):
+        """Sync filtered products to Capital prices"""
+        filtered_products = self.get_filtered_products()
+        if not filtered_products:
+            messagebox.showwarning("Warning", "No products in current filter")
+            return
+            
+        if not messagebox.askyesno("Confirm", f"Sync {len(filtered_products)} filtered products to Capital prices?"):
+            return
+            
+        updates = []
+        for product in filtered_products:
+            capital_price = product.get('capital_rtlprice')
+            if capital_price:
+                updates.append({
+                    "id": product['woo_id'],
+                    "regular_price": str(capital_price)
+                })
+                
+        if updates:
+            threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
         
     def on_product_double_click(self, event):
         """Handle double-click on product to edit"""
@@ -954,12 +1127,14 @@ class BridgeApp(ctk.CTk):
         tree_frame.grid_rowconfigure(0, weight=1)
         
         columns = (
-            "SKU", "Name", "WOO Regular", "Capital RTLPRICE", 
-            "Difference", "WOO Sale", "Discount %", "Action"
+            "Select", "SKU", "Name", "WOO Regular", "Capital RTLPRICE", 
+            "Difference", "WOO Sale", "Discount %"
         )
         
-        self.prices_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        # Enable extended selection mode for multi-select with shift+click and ctrl+click
+        self.prices_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
         
+        self.prices_tree.heading("Select", text="☑", command=self.toggle_all_prices)
         self.prices_tree.heading("SKU", text="SKU")
         self.prices_tree.heading("Name", text="Product Name")
         self.prices_tree.heading("WOO Regular", text="WOO Regular €")
@@ -967,8 +1142,8 @@ class BridgeApp(ctk.CTk):
         self.prices_tree.heading("Difference", text="Diff €")
         self.prices_tree.heading("WOO Sale", text="Sale Price €")
         self.prices_tree.heading("Discount %", text="Discount %")
-        self.prices_tree.heading("Action", text="Action")
         
+        self.prices_tree.column("Select", width=50, anchor="center")
         self.prices_tree.column("SKU", width=120)
         self.prices_tree.column("Name", width=250)
         self.prices_tree.column("WOO Regular", width=100)
@@ -976,7 +1151,6 @@ class BridgeApp(ctk.CTk):
         self.prices_tree.column("Difference", width=80)
         self.prices_tree.column("WOO Sale", width=100)
         self.prices_tree.column("Discount %", width=80)
-        self.prices_tree.column("Action", width=100)
         
         # Scrollbars
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.prices_tree.yview)
@@ -987,8 +1161,13 @@ class BridgeApp(ctk.CTk):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
         
-        # Bind double-click
+        # Bind events for checkbox and drag selection
+        self.prices_tree.bind("<Button-1>", self.on_price_click)
         self.prices_tree.bind("<Double-1>", self.on_price_double_click)
+        self.prices_tree.bind("<B1-Motion>", self.on_price_drag)
+        
+        # Track checkbox states
+        self.price_checkboxes = {}  # item_id -> checked state
         
         # Bottom actions
         actions_frame = ctk.CTkFrame(self.tab_prices)
@@ -1033,43 +1212,90 @@ class BridgeApp(ctk.CTk):
             capital_price = product.get('capital_rtlprice', 0)
             difference = woo_price - capital_price
             
-            self.prices_tree.insert("", "end", values=(
+            item_id = self.prices_tree.insert("", "end", values=(
+                "☐",  # Checkbox unchecked by default
                 product.get('sku', ''),
                 product.get('woo_name', '')[:40],
                 f"{woo_price:.2f}",
                 f"{capital_price:.2f}",
                 f"{difference:+.2f}",
                 f"{product.get('woo_sale_price', 0):.2f}" if product.get('woo_sale_price') else "-",
-                f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') else "-",
-                "Edit"
+                f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') else "-"
             ))
+            self.price_checkboxes[item_id] = False  # Track unchecked state
             count += 1
             
         self.price_count_label.configure(text=f"{count} products shown")
         
+    def toggle_all_prices(self):
+        """Toggle all checkboxes in prices table"""
+        # Check if any are unchecked
+        any_unchecked = any(not checked for checked in self.price_checkboxes.values())
+        
+        # Set all to checked if any unchecked, otherwise uncheck all
+        for item_id in self.price_checkboxes:
+            self.price_checkboxes[item_id] = any_unchecked
+            values = list(self.prices_tree.item(item_id, "values"))
+            values[0] = "☑" if any_unchecked else "☐"
+            self.prices_tree.item(item_id, values=values)
+            
+    def on_price_click(self, event):
+        """Handle click on price row to toggle checkbox"""
+        region = self.prices_tree.identify_region(event.x, event.y)
+        if region == "cell":
+            column = self.prices_tree.identify_column(event.x)
+            item = self.prices_tree.identify_row(event.y)
+            
+            if item and column == "#1":  # First column is checkbox
+                # Toggle checkbox
+                current_state = self.price_checkboxes.get(item, False)
+                self.price_checkboxes[item] = not current_state
+                
+                values = list(self.prices_tree.item(item, "values"))
+                values[0] = "☑" if not current_state else "☐"
+                self.prices_tree.item(item, values=values)
+                return "break"  # Prevent default selection
+                
+    def on_price_drag(self, event):
+        """Handle drag to select multiple checkboxes"""
+        item = self.prices_tree.identify_row(event.y)
+        column = self.prices_tree.identify_column(event.x)
+        
+        if item and column == "#1":  # Dragging over checkbox column
+            # Check the checkbox
+            if item in self.price_checkboxes:
+                self.price_checkboxes[item] = True
+                values = list(self.prices_tree.item(item, "values"))
+                values[0] = "☑"
+                self.prices_tree.item(item, values=values)
+        
     def on_price_double_click(self, event):
         """Handle double-click on price row"""
-        selection = self.prices_tree.selection()
-        if selection:
-            item = selection[0]
+        item = self.prices_tree.identify_row(event.y)
+        column = self.prices_tree.identify_column(event.x)
+        
+        # Don't open editor if clicking on checkbox column
+        if item and column != "#1":
             values = self.prices_tree.item(item, "values")
-            sku = values[0]
+            sku = values[1]  # SKU is now in column 1 (after checkbox)
             self.open_price_editor(sku)
             
     def update_selected_to_capital_price(self):
-        """Update selected products to Capital price"""
-        selection = self.prices_tree.selection()
-        if not selection:
-            messagebox.showwarning("Warning", "Please select products to update")
+        """Update checked products to Capital price"""
+        # Get all checked items
+        checked_items = [item_id for item_id, checked in self.price_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to update")
             return
             
-        if not messagebox.askyesno("Confirm", f"Update {len(selection)} products to Capital price?"):
+        if not messagebox.askyesno("Confirm", f"Update {len(checked_items)} products to Capital price?"):
             return
             
         updates = []
-        for item in selection:
+        for item in checked_items:
             values = self.prices_tree.item(item, "values")
-            sku = values[0]
+            sku = values[1]  # SKU is now in column 1 (after checkbox)
             product = data_store.get_product_by_sku(sku)
             if product:
                 updates.append({
@@ -1115,7 +1341,7 @@ class BridgeApp(ctk.CTk):
         """Setup unmatched products tab"""
         self.tab_unmatched.grid_columnconfigure(0, weight=1)
         self.tab_unmatched.grid_columnconfigure(1, weight=1)
-        self.tab_unmatched.grid_rowconfigure(1, weight=1)
+        self.tab_unmatched.grid_rowconfigure(2, weight=1)
         
         # Title
         ctk.CTkLabel(
@@ -1124,24 +1350,63 @@ class BridgeApp(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold")
         ).grid(row=0, column=0, columnspan=2, pady=10)
         
+        # Search filters row
+        filter_frame = ctk.CTkFrame(self.tab_unmatched)
+        filter_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        
+        # WooCommerce search
+        ctk.CTkLabel(filter_frame, text="Search WooCommerce:").grid(row=0, column=0, padx=5, pady=5)
+        self.unmatched_woo_search = ctk.CTkEntry(filter_frame, width=200, placeholder_text="SKU or Name")
+        self.unmatched_woo_search.grid(row=0, column=1, padx=5, pady=5)
+        self.unmatched_woo_search.bind("<KeyRelease>", lambda e: self.filter_unmatched_products())
+        
+        # Capital search
+        ctk.CTkLabel(filter_frame, text="Search Capital:").grid(row=0, column=2, padx=5, pady=5)
+        self.unmatched_capital_search = ctk.CTkEntry(filter_frame, width=200, placeholder_text="CODE or Name")
+        self.unmatched_capital_search.grid(row=0, column=3, padx=5, pady=5)
+        self.unmatched_capital_search.bind("<KeyRelease>", lambda e: self.filter_unmatched_products())
+        
+        # Clear filters button
+        ctk.CTkButton(
+            filter_frame,
+            text="❌ Clear",
+            command=self.clear_unmatched_filters,
+            width=80
+        ).grid(row=0, column=4, padx=10, pady=5)
+        
         # Left frame - Unmatched WooCommerce products
         left_frame = ctk.CTkFrame(self.tab_unmatched)
-        left_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        left_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
         left_frame.grid_rowconfigure(1, weight=1)
         left_frame.grid_columnconfigure(0, weight=1)
         
         ctk.CTkLabel(
             left_frame,
-            text="🛒 WooCommerce Products (No Capital Match)",
+            text="🛍️ WooCommerce Products (No Capital Match)",
             font=ctk.CTkFont(size=14, weight="bold")
         ).grid(row=0, column=0, pady=10)
         
-        self.unmatched_woo_listbox = tk.Listbox(left_frame, width=50, height=20)
-        self.unmatched_woo_listbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        # Use Treeview to show SKU and Name
+        woo_tree_frame = ctk.CTkFrame(left_frame)
+        woo_tree_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        woo_tree_frame.grid_columnconfigure(0, weight=1)
+        woo_tree_frame.grid_rowconfigure(0, weight=1)
+        
+        woo_columns = ("SKU", "Name")
+        self.unmatched_woo_tree = ttk.Treeview(woo_tree_frame, columns=woo_columns, show="headings", height=15)
+        self.unmatched_woo_tree.heading("SKU", text="SKU")
+        self.unmatched_woo_tree.heading("Name", text="Product Name")
+        self.unmatched_woo_tree.column("SKU", width=120)
+        self.unmatched_woo_tree.column("Name", width=300)
+        
+        woo_vsb = ttk.Scrollbar(woo_tree_frame, orient="vertical", command=self.unmatched_woo_tree.yview)
+        self.unmatched_woo_tree.configure(yscrollcommand=woo_vsb.set)
+        self.unmatched_woo_tree.grid(row=0, column=0, sticky="nsew")
+        woo_vsb.grid(row=0, column=1, sticky="ns")
         
         # Right frame - Unmatched Capital products
         right_frame = ctk.CTkFrame(self.tab_unmatched)
-        right_frame.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
+        right_frame.grid(row=2, column=1, sticky="nsew", padx=10, pady=10)
         right_frame.grid_rowconfigure(1, weight=1)
         right_frame.grid_columnconfigure(0, weight=1)
         
@@ -1151,27 +1416,84 @@ class BridgeApp(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold")
         ).grid(row=0, column=0, pady=10)
         
-        self.unmatched_capital_listbox = tk.Listbox(right_frame, width=50, height=20)
-        self.unmatched_capital_listbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        # Use Treeview to show CODE and Name
+        capital_tree_frame = ctk.CTkFrame(right_frame)
+        capital_tree_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        capital_tree_frame.grid_columnconfigure(0, weight=1)
+        capital_tree_frame.grid_rowconfigure(0, weight=1)
+        
+        capital_columns = ("CODE", "Name")
+        self.unmatched_capital_tree = ttk.Treeview(capital_tree_frame, columns=capital_columns, show="headings", height=15)
+        self.unmatched_capital_tree.heading("CODE", text="CODE")
+        self.unmatched_capital_tree.heading("Name", text="Product Name")
+        self.unmatched_capital_tree.column("CODE", width=120)
+        self.unmatched_capital_tree.column("Name", width=300)
+        
+        capital_vsb = ttk.Scrollbar(capital_tree_frame, orient="vertical", command=self.unmatched_capital_tree.yview)
+        self.unmatched_capital_tree.configure(yscrollcommand=capital_vsb.set)
+        self.unmatched_capital_tree.grid(row=0, column=0, sticky="nsew")
+        capital_vsb.grid(row=0, column=1, sticky="ns")
         
         # Match button
         ctk.CTkButton(
             self.tab_unmatched,
             text="🔗 Match Selected Products",
             command=self.match_selected_products
-        ).grid(row=2, column=0, columnspan=2, pady=10)
+        ).grid(row=3, column=0, columnspan=2, pady=10)
+        
+    def filter_unmatched_products(self):
+        """Filter unmatched products based on search criteria"""
+        woo_search = self.unmatched_woo_search.get().strip().lower()
+        capital_search = self.unmatched_capital_search.get().strip().lower()
+        
+        # Clear current items
+        for item in self.unmatched_woo_tree.get_children():
+            self.unmatched_woo_tree.delete(item)
+        for item in self.unmatched_capital_tree.get_children():
+            self.unmatched_capital_tree.delete(item)
+            
+        # Filter WooCommerce unmatched
+        for product in data_store.unmatched_woo:
+            sku = product.get('sku', '').lower()
+            name = product.get('name', '').lower()
+            
+            if not woo_search or woo_search in sku or woo_search in name:
+                self.unmatched_woo_tree.insert("", "end", values=(
+                    product.get('sku', ''),
+                    product.get('name', '')[:50]
+                ))
+                
+        # Filter Capital unmatched
+        for product in data_store.unmatched_capital:
+            code = product.get('CODE', '').lower()
+            name = product.get('NAME', '').lower()
+            
+            if not capital_search or capital_search in code or capital_search in name:
+                self.unmatched_capital_tree.insert("", "end", values=(
+                    product.get('CODE', ''),
+                    product.get('NAME', '')[:50]
+                ))
+                
+    def clear_unmatched_filters(self):
+        """Clear unmatched product filters"""
+        self.unmatched_woo_search.delete(0, "end")
+        self.unmatched_capital_search.delete(0, "end")
+        self.filter_unmatched_products()
         
     def match_selected_products(self):
         """Match selected products manually"""
-        woo_selection = self.unmatched_woo_listbox.curselection()
-        capital_selection = self.unmatched_capital_listbox.curselection()
+        woo_selection = self.unmatched_woo_tree.selection()
+        capital_selection = self.unmatched_capital_tree.selection()
         
         if not woo_selection or not capital_selection:
             messagebox.showwarning("Warning", "Please select a product from each list to match")
             return
             
-        # Get selected items and show matching dialog
-        messagebox.showinfo("Info", "Manual matching feature - to be implemented based on your workflow")
+        # Get selected items
+        woo_item = self.unmatched_woo_tree.item(woo_selection[0], "values")
+        capital_item = self.unmatched_capital_tree.item(capital_selection[0], "values")
+        
+        messagebox.showinfo("Info", f"Matching:\nWooCommerce: {woo_item[0]} - {woo_item[1]}\nCapital: {capital_item[0]} - {capital_item[1]}\n\nManual matching feature - to be implemented based on your workflow")
         
     # ========================================================================
     # ANALYTICS TAB
@@ -1326,6 +1648,49 @@ class BridgeApp(ctk.CTk):
             data_store.woo_products = self.woo_client.get_all_products(progress_callback=woo_progress)
             self.log(f"Fetched {len(data_store.woo_products)} WooCommerce products")
             
+            # Fetch product variations for variable products
+            data_store.set_loading(True, 40, "Fetching product variations...")
+            self.log("Fetching product variations...")
+            
+            variation_count = 0
+            variable_products = [p for p in data_store.woo_products if p.get('type') == 'variable']
+            
+            for idx, product in enumerate(variable_products):
+                variations = self.woo_client.get_product_variations(product['id'])
+                if variations:
+                    # Add variations as separate products with parent SKU reference
+                    for variation in variations:
+                        # Create a variation product entry
+                        variation_product = {
+                            'id': variation['id'],
+                            'parent_id': product['id'],
+                            'name': f"{product['name']} - {', '.join([attr['option'] for attr in variation.get('attributes', [])])}",
+                            'sku': variation.get('sku', ''),
+                            'regular_price': variation.get('regular_price', ''),
+                            'sale_price': variation.get('sale_price', ''),
+                            'description': variation.get('description', ''),
+                            'short_description': product.get('short_description', ''),
+                            'categories': product.get('categories', []),
+                            'stock_status': variation.get('stock_status', ''),
+                            'stock_quantity': variation.get('stock_quantity', ''),
+                            'permalink': variation.get('permalink', ''),
+                            'date_created': variation.get('date_created', ''),
+                            'date_modified': variation.get('date_modified', ''),
+                            'total_sales': product.get('total_sales', 0),
+                            'attributes': variation.get('attributes', []),
+                            'is_variation': True
+                        }
+                        # Only add if variation has a SKU
+                        if variation_product['sku']:
+                            data_store.woo_products.append(variation_product)
+                            variation_count += 1
+                            
+                if (idx + 1) % 10 == 0:  # Update progress every 10 products
+                    progress = int((idx + 1) / len(variable_products) * 100)
+                    data_store.set_loading(True, 40 + int(progress * 0.05), f"Fetching variations... {idx + 1}/{len(variable_products)}")
+                    
+            self.log(f"Fetched {variation_count} product variations from {len(variable_products)} variable products")
+            
             # Fetch WooCommerce categories
             data_store.set_loading(True, 45, "Fetching categories...")
             data_store.woo_categories = self.woo_client.get_categories()
@@ -1424,11 +1789,12 @@ class BridgeApp(ctk.CTk):
         mismatches = sum(1 for p in data_store.matched_products if not p.get('price_match'))
         self.mismatch_card.value_label.configure(text=str(mismatches))
         
-        # Update category filter
-        categories = ["All Categories"] + sorted(set(
+        # Update brand filter (only parent categories - brands)
+        brands = ["All Brands"] + sorted(set(
             cat.get('name', '') for cat in data_store.woo_categories
+            if cat.get('parent', 0) == 0  # Only parent categories (brands)
         ))
-        self.product_category_filter.configure(values=categories)
+        self.product_category_filter.configure(values=brands)
         
         # Refresh products table
         self.filter_products()
