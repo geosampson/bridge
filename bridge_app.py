@@ -942,6 +942,11 @@ class BridgeApp(ctk.CTk):
         )
         self.selection_label.grid(row=2, column=0, padx=10, pady=5, sticky="w")
         
+    def refresh_products_table(self):
+        """Refresh products table while preserving current filters"""
+        # Simply call filter_products which will re-apply current filters
+        self.filter_products()
+    
     def filter_products(self):
         """Filter products based on criteria"""
         sku_filter = self.product_sku_filter.get().strip().upper()
@@ -1448,6 +1453,9 @@ class BridgeApp(ctk.CTk):
                     data_store.update_woo_product_locally(update['id'], local_update)
                     
             data_store.set_loading(False, 100, "Update complete!")
+            
+            # Refresh both Products and Prices tables
+            self.after(0, self.refresh_products_table)
             self.after(0, self.refresh_prices_table)
             self.after(100, lambda: messagebox.showinfo("Success", f"Successfully updated {len(updates)} products!"))
             
