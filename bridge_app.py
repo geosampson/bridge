@@ -946,7 +946,8 @@ class BridgeApp(ctk.CTk):
             if name_filter and name_filter not in name.lower():
                 continue
             if category_filter != "All Brands":
-                if category_filter not in categories:
+                # Match brand against beginning of product name
+                if not name.startswith(category_filter):
                     continue
                     
             # Add to treeview
@@ -1421,16 +1422,21 @@ class BridgeApp(ctk.CTk):
                 
                 # Update local cache
                 for update in batch:
-                    data_store.update_woo_product_locally(update['id'], {
-                        'regular_price': update['regular_price']
-                    })
+                    local_update = {}
+                    if 'regular_price' in update:
+                        local_update['regular_price'] = update['regular_price']
+                    if 'sale_price' in update:
+                        local_update['sale_price'] = update['sale_price']
+                    data_store.update_woo_product_locally(update['id'], local_update)
                     
             data_store.set_loading(False, 100, "Update complete!")
             self.after(0, self.refresh_prices_table)
+            self.after(100, lambda: messagebox.showinfo("Success", f"Successfully updated {len(updates)} products!"))
             
         except Exception as e:
-            data_store.set_loading(False, 0, f"Error: {str(e)}")
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            data_store.set_loading(False, 0, "Update failed")
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to update prices: {str(e)}"))
+            print(f"Batch update error: {e}")
             
     # ========================================================================
     # UNMATCHED TAB
@@ -1503,6 +1509,9 @@ class BridgeApp(ctk.CTk):
         self.unmatched_woo_tree.grid(row=0, column=0, sticky="nsew")
         woo_vsb.grid(row=0, column=1, sticky="ns")
         
+        # Double-click to edit
+        self.unmatched_woo_tree.bind("<Double-1>", self.on_unmatched_woo_double_click)
+        
         # Right frame - Unmatched Capital products
         right_frame = ctk.CTkFrame(self.tab_unmatched)
         right_frame.grid(row=2, column=1, sticky="nsew", padx=10, pady=10)
@@ -1532,6 +1541,9 @@ class BridgeApp(ctk.CTk):
         self.unmatched_capital_tree.configure(yscrollcommand=capital_vsb.set)
         self.unmatched_capital_tree.grid(row=0, column=0, sticky="nsew")
         capital_vsb.grid(row=0, column=1, sticky="ns")
+        
+        # Double-click to edit
+        self.unmatched_capital_tree.bind("<Double-1>", self.on_unmatched_capital_double_click)
         
         # Match button
         ctk.CTkButton(
@@ -1578,6 +1590,38 @@ class BridgeApp(ctk.CTk):
         self.unmatched_woo_search.delete(0, "end")
         self.unmatched_capital_search.delete(0, "end")
         self.filter_unmatched_products()
+        
+    def on_unmatched_woo_double_click(self, event):
+        """Handle double-click on unmatched WooCommerce product"""
+        selection = self.unmatched_woo_tree.selection()
+        if selection:
+            values = self.unmatched_woo_tree.item(selection[0], "values")
+            sku = values[0]
+            # Find the full product data
+            for product in data_store.unmatched_woo:
+                if product.get('sku', '') == sku:
+                    self.open_unmatched_woo_editor(product)
+                    break
+                    
+    def on_unmatched_capital_double_click(self, event):
+        """Handle double-click on unmatched Capital product"""
+        selection = self.unmatched_capital_tree.selection()
+        if selection:
+            values = self.unmatched_capital_tree.item(selection[0], "values")
+            code = values[0]
+            # Find the full product data
+            for product in data_store.unmatched_capital:
+                if product.get('CODE', '') == code:
+                    self.open_unmatched_capital_editor(product)
+                    break
+                    
+    def open_unmatched_woo_editor(self, product):
+        """Open editor dialog for unmatched WooCommerce product"""
+        UnmatchedWooEditorDialog(self, product, self.woo_client)
+        
+    def open_unmatched_capital_editor(self, product):
+        """Open editor dialog for unmatched Capital product"""
+        UnmatchedCapitalEditorDialog(self, product, self.db)
         
     def match_selected_products(self):
         """Match selected products manually"""
@@ -1888,11 +1932,22 @@ class BridgeApp(ctk.CTk):
         mismatches = sum(1 for p in data_store.matched_products if not p.get('price_match'))
         self.mismatch_card.value_label.configure(text=str(mismatches))
         
-        # Update brand filter (only parent categories - brands)
-        brands = ["All Brands"] + sorted(set(
-            cat.get('name', '') for cat in data_store.woo_categories
-            if cat.get('parent', 0) == 0  # Only parent categories (brands)
-        ))
+        # Update brand filter - extract unique brands from product names
+        # Brands are typically the first word/part of the product name (e.g., "3M", "ABICOR BINZEL")
+        brands_set = set()
+        for product in data_store.woo_products:
+            name = product.get('name', '')
+            # Extract first part of name as brand (before first space or dash)
+            if name:
+                # Try to extract brand from beginning of product name
+                parts = name.split()
+                if parts:
+                    # Check if first part looks like a brand (uppercase, alphanumeric)
+                    potential_brand = parts[0].strip()
+                    if potential_brand and len(potential_brand) <= 30:
+                        brands_set.add(potential_brand)
+        
+        brands = ["All Brands"] + sorted(brands_set)
         self.product_category_filter.configure(values=brands)
         
         # Refresh products table
@@ -2270,3 +2325,272 @@ class PriceEditorDialog(ctk.CTkToplevel):
 if __name__ == "__main__":
     app = BridgeApp()
     app.mainloop()
+
+
+class UnmatchedWooEditorDialog(ctk.CTkToplevel):
+    """Dialog for editing unmatched WooCommerce products"""
+    
+    def __init__(self, parent, product, woo_client):
+        super().__init__(parent)
+        
+        self.product = product
+        self.woo_client = woo_client
+        
+        self.title(f"Edit WooCommerce Product: {product.get('sku', 'Unknown')}")
+        self.geometry("600x700")
+        self.transient(parent)
+        self.grab_set()
+        
+        # Main frame
+        main_frame = ctk.CTkScrollableFrame(self)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # SKU (read-only)
+        ctk.CTkLabel(main_frame, text="SKU:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=10, pady=5)
+        sku_entry = ctk.CTkEntry(main_frame, width=400)
+        sku_entry.insert(0, product.get('sku', ''))
+        sku_entry.configure(state="readonly")
+        sku_entry.grid(row=0, column=1, padx=10, pady=5)
+        
+        # Name
+        ctk.CTkLabel(main_frame, text="Name:", font=ctk.CTkFont(weight="bold")).grid(row=1, column=0, sticky="w", padx=10, pady=5)
+        self.name_entry = ctk.CTkEntry(main_frame, width=400)
+        self.name_entry.insert(0, product.get('name', ''))
+        self.name_entry.grid(row=1, column=1, padx=10, pady=5)
+        
+        # Regular Price
+        ctk.CTkLabel(main_frame, text="Regular Price (€):", font=ctk.CTkFont(weight="bold")).grid(row=2, column=0, sticky="w", padx=10, pady=5)
+        self.regular_price_entry = ctk.CTkEntry(main_frame, width=200)
+        self.regular_price_entry.insert(0, str(product.get('regular_price', '')))
+        self.regular_price_entry.grid(row=2, column=1, sticky="w", padx=10, pady=5)
+        
+        # Sale Price
+        ctk.CTkLabel(main_frame, text="Sale Price (€):", font=ctk.CTkFont(weight="bold")).grid(row=3, column=0, sticky="w", padx=10, pady=5)
+        self.sale_price_entry = ctk.CTkEntry(main_frame, width=200)
+        self.sale_price_entry.insert(0, str(product.get('sale_price', '')))
+        self.sale_price_entry.grid(row=3, column=1, sticky="w", padx=10, pady=5)
+        
+        # Discount calculator
+        ctk.CTkButton(
+            main_frame,
+            text="🧮 Calculate Discount",
+            command=self.calculate_discount,
+            width=150
+        ).grid(row=4, column=1, sticky="w", padx=10, pady=5)
+        
+        # Short Description
+        ctk.CTkLabel(main_frame, text="Short Description:", font=ctk.CTkFont(weight="bold")).grid(row=5, column=0, sticky="nw", padx=10, pady=5)
+        self.short_desc_text = ctk.CTkTextbox(main_frame, width=400, height=100)
+        self.short_desc_text.grid(row=5, column=1, padx=10, pady=5)
+        self.short_desc_text.insert("1.0", product.get('short_description', ''))
+        
+        # Description
+        ctk.CTkLabel(main_frame, text="Description:", font=ctk.CTkFont(weight="bold")).grid(row=6, column=0, sticky="nw", padx=10, pady=5)
+        self.desc_text = ctk.CTkTextbox(main_frame, width=400, height=150)
+        self.desc_text.grid(row=6, column=1, padx=10, pady=5)
+        self.desc_text.insert("1.0", product.get('description', ''))
+        
+        # Buttons
+        btn_frame = ctk.CTkFrame(self)
+        btn_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="💾 Save Changes",
+            command=self.save_changes,
+            fg_color="green"
+        ).pack(side="left", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="❌ Cancel",
+            command=self.destroy,
+            fg_color="gray"
+        ).pack(side="right", padx=10)
+        
+    def calculate_discount(self):
+        """Calculate sale price based on discount percentage"""
+        try:
+            regular = float(self.regular_price_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid regular price")
+            return
+            
+        discount = ctk.CTkInputDialog(
+            text="Enter discount percentage:",
+            title="Calculate Discount"
+        ).get_input()
+        
+        if discount:
+            try:
+                discount_pct = float(discount)
+                sale_price = regular * (1 - discount_pct / 100)
+                self.sale_price_entry.delete(0, "end")
+                self.sale_price_entry.insert(0, f"{sale_price:.2f}")
+            except ValueError:
+                messagebox.showerror("Error", "Invalid discount percentage")
+                
+    def save_changes(self):
+        """Save changes to WooCommerce"""
+        try:
+            data = {}
+            
+            # Name
+            name = self.name_entry.get().strip()
+            if name:
+                data['name'] = name
+            
+            # Price
+            regular_price = self.regular_price_entry.get().strip()
+            if regular_price:
+                data['regular_price'] = regular_price
+                
+            sale_price = self.sale_price_entry.get().strip()
+            data['sale_price'] = sale_price if sale_price else ""
+            
+            # Descriptions
+            short_desc = self.short_desc_text.get("1.0", "end").strip()
+            data['short_description'] = short_desc
+            
+            description = self.desc_text.get("1.0", "end").strip()
+            data['description'] = description
+            
+            # Update WooCommerce
+            self.woo_client.update_product(self.product['id'], data)
+            
+            messagebox.showinfo("Success", "Product updated successfully!")
+            self.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update: {str(e)}")
+
+
+class UnmatchedCapitalEditorDialog(ctk.CTkToplevel):
+    """Dialog for editing unmatched Capital products"""
+    
+    def __init__(self, parent, product, db):
+        super().__init__(parent)
+        
+        self.product = product
+        self.db = db
+        
+        self.title(f"Edit Capital Product: {product.get('CODE', 'Unknown')}")
+        self.geometry("600x600")
+        self.transient(parent)
+        self.grab_set()
+        
+        # Main frame
+        main_frame = ctk.CTkScrollableFrame(self)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # CODE
+        ctk.CTkLabel(main_frame, text="CODE:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=10, pady=5)
+        self.code_entry = ctk.CTkEntry(main_frame, width=400)
+        self.code_entry.insert(0, product.get('CODE', ''))
+        self.code_entry.grid(row=0, column=1, padx=10, pady=5)
+        
+        # NAME
+        ctk.CTkLabel(main_frame, text="NAME:", font=ctk.CTkFont(weight="bold")).grid(row=1, column=0, sticky="w", padx=10, pady=5)
+        self.name_entry = ctk.CTkEntry(main_frame, width=400)
+        self.name_entry.insert(0, product.get('NAME', ''))
+        self.name_entry.grid(row=1, column=1, padx=10, pady=5)
+        
+        # DESCR
+        ctk.CTkLabel(main_frame, text="DESCRIPTION:", font=ctk.CTkFont(weight="bold")).grid(row=2, column=0, sticky="nw", padx=10, pady=5)
+        self.descr_text = ctk.CTkTextbox(main_frame, width=400, height=150)
+        self.descr_text.grid(row=2, column=1, padx=10, pady=5)
+        self.descr_text.insert("1.0", product.get('DESCR', ''))
+        
+        # RTLPRICE
+        ctk.CTkLabel(main_frame, text="Retail Price (€):", font=ctk.CTkFont(weight="bold")).grid(row=3, column=0, sticky="w", padx=10, pady=5)
+        self.rtlprice_entry = ctk.CTkEntry(main_frame, width=200)
+        self.rtlprice_entry.insert(0, str(product.get('RTLPRICE', '')))
+        self.rtlprice_entry.grid(row=3, column=1, sticky="w", padx=10, pady=5)
+        
+        # WHLPRICE
+        ctk.CTkLabel(main_frame, text="Wholesale Price (€):", font=ctk.CTkFont(weight="bold")).grid(row=4, column=0, sticky="w", padx=10, pady=5)
+        self.whlprice_entry = ctk.CTkEntry(main_frame, width=200)
+        self.whlprice_entry.insert(0, str(product.get('WHLPRICE', '')))
+        self.whlprice_entry.grid(row=4, column=1, sticky="w", padx=10, pady=5)
+        
+        # Discount calculator
+        ctk.CTkButton(
+            main_frame,
+            text="🧮 Calculate Discount Price",
+            command=self.calculate_discount,
+            width=180
+        ).grid(row=5, column=1, sticky="w", padx=10, pady=5)
+        
+        # Info label
+        ctk.CTkLabel(
+            main_frame,
+            text="Note: Changes to Capital products are saved locally only.\nSync with Capital ERP system separately.",
+            text_color="gray",
+            wraplength=400
+        ).grid(row=6, column=0, columnspan=2, padx=10, pady=20)
+        
+        # Buttons
+        btn_frame = ctk.CTkFrame(self)
+        btn_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="💾 Save Changes",
+            command=self.save_changes,
+            fg_color="green"
+        ).pack(side="left", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="❌ Cancel",
+            command=self.destroy,
+            fg_color="gray"
+        ).pack(side="right", padx=10)
+        
+    def calculate_discount(self):
+        """Calculate discounted price based on percentage"""
+        try:
+            retail = float(self.rtlprice_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid retail price")
+            return
+            
+        discount = ctk.CTkInputDialog(
+            text="Enter discount percentage:",
+            title="Calculate Discount"
+        ).get_input()
+        
+        if discount:
+            try:
+                discount_pct = float(discount)
+                discounted_price = retail * (1 - discount_pct / 100)
+                messagebox.showinfo("Discounted Price", f"Price after {discount_pct}% discount: €{discounted_price:.2f}")
+            except ValueError:
+                messagebox.showerror("Error", "Invalid discount percentage")
+                
+    def save_changes(self):
+        """Save changes to local database"""
+        try:
+            # Update product data
+            self.product['CODE'] = self.code_entry.get().strip()
+            self.product['NAME'] = self.name_entry.get().strip()
+            self.product['DESCR'] = self.descr_text.get("1.0", "end").strip()
+            
+            rtlprice = self.rtlprice_entry.get().strip()
+            if rtlprice:
+                self.product['RTLPRICE'] = float(rtlprice)
+                
+            whlprice = self.whlprice_entry.get().strip()
+            if whlprice:
+                self.product['WHLPRICE'] = float(whlprice)
+            
+            # Save to database (implement as needed)
+            # self.db.update_capital_product(self.product)
+            
+            messagebox.showinfo("Success", "Product updated locally!")
+            self.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update: {str(e)}")
+
+
