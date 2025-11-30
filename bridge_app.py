@@ -1,0 +1,1817 @@
+#!/usr/bin/env python3
+"""
+BRIDGE - WooCommerce & Capital ERP Product Management System
+============================================================
+A comprehensive tool for managing e-shop products by syncing data between
+WooCommerce and SoftOne Capital ERP.
+
+Features:
+- Product matching between WooCommerce and Capital ERP
+- Price and discount management
+- Product data editing (description, etc.)
+- Filtering by code, description, category
+- Analytics and sales statistics
+- Batch updates for product groups
+
+Author: Roussakis Supplies IKE
+"""
+
+import customtkinter as ctk
+from tkinter import ttk, messagebox
+import tkinter as tk
+import requests
+from requests.auth import HTTPBasicAuth
+import urllib3
+import threading
+from datetime import datetime, timedelta
+import json
+import sqlite3
+import os
+from collections import defaultdict
+
+# Disable SSL warnings for Capital ERP
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# WooCommerce API Configuration
+WOOCOMMERCE_CONFIG = {
+    "store_url": "https://roussakis.com.gr",
+    "consumer_key": "ck_bb11ea8930c80ab895887236e037ddcfbee003e1",
+    "consumer_secret": "cs_c7cc521fbe93def7c731a920632c0c23c50d0bd7"
+}
+
+# Capital ERP Configuration
+CAPITAL_CONFIG = {
+    "base_url": "https://401003161911.oncloud.gr/s1services",
+    "username": "WEBESHOP",
+    "password": "1975",
+    "company": 1,
+    "fiscalyear": 2025,
+    "branch": 1
+}
+
+# Application Theme
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
+# ============================================================================
+# DATA STORE - Shared data between all panels
+# ============================================================================
+
+class DataStore:
+    """
+    Central data store that holds all fetched data.
+    This prevents repeated API calls and shares data between panels.
+    """
+    
+    def __init__(self):
+        self.woo_products = []           # All WooCommerce products
+        self.capital_products = []        # All Capital ERP products
+        self.woo_orders = []              # All WooCommerce orders
+        self.woo_categories = []          # WooCommerce categories
+        self.matched_products = []        # Products matched between systems
+        self.unmatched_woo = []           # WooCommerce products without Capital match
+        self.unmatched_capital = []       # Capital products without WooCommerce match
+        
+        self.capital_session_id = None    # Capital ERP session
+        self.last_fetch_time = None       # When data was last fetched
+        
+        self.is_loading = False           # Loading state flag
+        self.load_progress = 0            # Loading progress (0-100)
+        self.load_status = ""             # Current loading status message
+        
+        # Callbacks for UI updates
+        self.on_data_changed = []
+        self.on_loading_changed = []
+        
+    def add_data_listener(self, callback):
+        """Add a callback to be notified when data changes"""
+        self.on_data_changed.append(callback)
+        
+    def add_loading_listener(self, callback):
+        """Add a callback to be notified when loading state changes"""
+        self.on_loading_changed.append(callback)
+        
+    def notify_data_changed(self):
+        """Notify all listeners that data has changed"""
+        for callback in self.on_data_changed:
+            try:
+                callback()
+            except Exception as e:
+                print(f"Error in data listener: {e}")
+                
+    def notify_loading_changed(self):
+        """Notify all listeners that loading state changed"""
+        for callback in self.on_loading_changed:
+            try:
+                callback()
+            except Exception as e:
+                print(f"Error in loading listener: {e}")
+                
+    def set_loading(self, is_loading, progress=0, status=""):
+        """Update loading state"""
+        self.is_loading = is_loading
+        self.load_progress = progress
+        self.load_status = status
+        self.notify_loading_changed()
+        
+    def get_product_by_sku(self, sku):
+        """Get matched product data by SKU"""
+        for product in self.matched_products:
+            if product.get('sku', '').strip().upper() == sku.strip().upper():
+                return product
+        return None
+        
+    def update_woo_product_locally(self, product_id, updates):
+        """Update a WooCommerce product in local cache after API update"""
+        for i, product in enumerate(self.woo_products):
+            if product['id'] == product_id:
+                self.woo_products[i].update(updates)
+                break
+        # Also update in matched products
+        for i, product in enumerate(self.matched_products):
+            if product.get('woo_id') == product_id:
+                for key, value in updates.items():
+                    if key == 'regular_price':
+                        self.matched_products[i]['woo_regular_price'] = value
+                    elif key == 'sale_price':
+                        self.matched_products[i]['woo_sale_price'] = value
+                    elif key == 'description':
+                        self.matched_products[i]['woo_description'] = value
+                    elif key == 'short_description':
+                        self.matched_products[i]['woo_short_description'] = value
+                break
+        self.notify_data_changed()
+
+
+# Global data store instance
+data_store = DataStore()
+
+
+# ============================================================================
+# API CLIENTS
+# ============================================================================
+
+class WooCommerceClient:
+    """WooCommerce REST API client"""
+    
+    def __init__(self, config):
+        self.store_url = config["store_url"]
+        self.auth = HTTPBasicAuth(config["consumer_key"], config["consumer_secret"])
+        
+    def get_products(self, per_page=100, page=1, **kwargs):
+        """Get products from WooCommerce"""
+        url = f"{self.store_url}/wp-json/wc/v3/products"
+        params = {"per_page": per_page, "page": page, **kwargs}
+        response = requests.get(url, auth=self.auth, params=params, timeout=60)
+        response.raise_for_status()
+        return response.json(), response.headers
+        
+    def get_all_products(self, progress_callback=None):
+        """Get all products with pagination"""
+        all_products = []
+        page = 1
+        per_page = 100
+        
+        while True:
+            products, headers = self.get_products(per_page=per_page, page=page)
+            if not products:
+                break
+            all_products.extend(products)
+            
+            total_pages = int(headers.get('X-WP-TotalPages', 1))
+            if progress_callback:
+                progress = min(100, int((page / total_pages) * 100))
+                progress_callback(progress, f"Fetching WooCommerce products... Page {page}/{total_pages}")
+                
+            if page >= total_pages:
+                break
+            page += 1
+            
+        return all_products
+        
+    def get_orders(self, per_page=100, page=1, **kwargs):
+        """Get orders from WooCommerce"""
+        url = f"{self.store_url}/wp-json/wc/v3/orders"
+        params = {"per_page": per_page, "page": page, **kwargs}
+        response = requests.get(url, auth=self.auth, params=params, timeout=60)
+        response.raise_for_status()
+        return response.json(), response.headers
+        
+    def get_all_orders(self, status=None, after=None, progress_callback=None):
+        """Get all orders with pagination"""
+        all_orders = []
+        page = 1
+        per_page = 100
+        
+        params = {}
+        if status:
+            params['status'] = status
+        if after:
+            params['after'] = after
+            
+        while True:
+            orders, headers = self.get_orders(per_page=per_page, page=page, **params)
+            if not orders:
+                break
+            all_orders.extend(orders)
+            
+            total_pages = int(headers.get('X-WP-TotalPages', 1))
+            if progress_callback:
+                progress = min(100, int((page / total_pages) * 100))
+                progress_callback(progress, f"Fetching orders... Page {page}/{total_pages}")
+                
+            if page >= total_pages:
+                break
+            page += 1
+            
+        return all_orders
+        
+    def get_categories(self):
+        """Get all product categories"""
+        all_categories = []
+        page = 1
+        per_page = 100
+        
+        while True:
+            url = f"{self.store_url}/wp-json/wc/v3/products/categories"
+            params = {"per_page": per_page, "page": page}
+            response = requests.get(url, auth=self.auth, params=params, timeout=30)
+            response.raise_for_status()
+            categories = response.json()
+            
+            if not categories:
+                break
+            all_categories.extend(categories)
+            
+            total_pages = int(response.headers.get('X-WP-TotalPages', 1))
+            if page >= total_pages:
+                break
+            page += 1
+            
+        return all_categories
+        
+    def update_product(self, product_id, data):
+        """Update a product on WooCommerce"""
+        url = f"{self.store_url}/wp-json/wc/v3/products/{product_id}"
+        response = requests.put(url, auth=self.auth, json=data, timeout=30)
+        response.raise_for_status()
+        return response.json()
+        
+    def batch_update_products(self, updates):
+        """Batch update multiple products"""
+        url = f"{self.store_url}/wp-json/wc/v3/products/batch"
+        data = {"update": updates}
+        response = requests.post(url, auth=self.auth, json=data, timeout=120)
+        response.raise_for_status()
+        return response.json()
+
+
+class CapitalClient:
+    """SoftOne Capital ERP API client"""
+    
+    def __init__(self, config):
+        self.base_url = config["base_url"]
+        self.config = config
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session_id = None
+        
+    def login(self):
+        """Login to Capital ERP and get session ID"""
+        login_data = {
+            "service": "login",
+            "company": self.config["company"],
+            "fiscalyear": self.config["fiscalyear"],
+            "branch": self.config["branch"],
+            "username": self.config["username"],
+            "password": self.config["password"]
+        }
+        
+        response = self.session.post(self.base_url, json=login_data, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get("success"):
+            self.session_id = result.get("sessionid")
+            return self.session_id
+        else:
+            raise Exception(f"Capital login failed: {result.get('message', 'Unknown error')}")
+            
+    def get_products(self, fields=None, filters=None):
+        """Get products from Capital ERP"""
+        if not self.session_id:
+            self.login()
+            
+        if fields is None:
+            # Default fields for product matching
+            fields = "CODE;DESCR;RTLPRICE;WHSPRICE;TRMODE;DISCOUNT;MAXDISCOUNT"
+            
+        request_data = {
+            "service": "getdata",
+            "sessionid": self.session_id,
+            "action": "read",
+            "tablename": "STOCKITEMS",
+            "fields": fields
+        }
+        
+        if filters:
+            request_data["filters"] = filters
+            
+        response = self.session.post(self.base_url, json=request_data, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        
+        if result.get("success"):
+            # Data can be in different formats depending on Capital version
+            data = result.get("data", [])
+            if not data:
+                data = result.get("STOCKITEMS", [])
+            if not data:
+                data = result.get("rows", [])
+            return data
+        else:
+            raise Exception(f"Failed to get Capital products: {result.get('message', 'Unknown error')}")
+
+
+# ============================================================================
+# PRODUCT MATCHER
+# ============================================================================
+
+class ProductMatcher:
+    """Matches products between WooCommerce and Capital ERP"""
+    
+    @staticmethod
+    def match_products(woo_products, capital_products):
+        """
+        Match products between WooCommerce and Capital by SKU/CODE
+        Returns: matched, unmatched_woo, unmatched_capital
+        """
+        matched = []
+        unmatched_woo = []
+        unmatched_capital = list(capital_products)  # Copy to track unmatched
+        
+        # Create lookup dictionary for Capital products
+        capital_lookup = {}
+        for cap_product in capital_products:
+            code = str(cap_product.get('CODE', '')).strip().upper()
+            if code:
+                capital_lookup[code] = cap_product
+                
+        for woo_product in woo_products:
+            sku = str(woo_product.get('sku', '')).strip().upper()
+            
+            if sku and sku in capital_lookup:
+                cap_product = capital_lookup[sku]
+                
+                # Calculate discount percentage
+                regular_price = float(woo_product.get('regular_price') or 0)
+                sale_price = float(woo_product.get('sale_price') or 0)
+                discount_percent = 0
+                if regular_price > 0 and sale_price > 0:
+                    discount_percent = round((1 - sale_price / regular_price) * 100, 2)
+                    
+                matched_product = {
+                    'sku': sku,
+                    'woo_id': woo_product['id'],
+                    'woo_name': woo_product.get('name', ''),
+                    'woo_regular_price': regular_price,
+                    'woo_sale_price': sale_price,
+                    'woo_discount_percent': discount_percent,
+                    'woo_stock_quantity': woo_product.get('stock_quantity'),
+                    'woo_stock_status': woo_product.get('stock_status'),
+                    'woo_total_sales': woo_product.get('total_sales', 0),
+                    'woo_description': woo_product.get('description', ''),
+                    'woo_short_description': woo_product.get('short_description', ''),
+                    'woo_categories': [cat.get('name', '') for cat in woo_product.get('categories', [])],
+                    'woo_permalink': woo_product.get('permalink', ''),
+                    'woo_date_created': woo_product.get('date_created', ''),
+                    'woo_date_modified': woo_product.get('date_modified', ''),
+                    
+                    'capital_code': cap_product.get('CODE', ''),
+                    'capital_descr': cap_product.get('DESCR', ''),
+                    'capital_rtlprice': float(cap_product.get('RTLPRICE') or 0),
+                    'capital_whsprice': float(cap_product.get('WHSPRICE') or 0),
+                    'capital_trmode': cap_product.get('TRMODE', 0),
+                    'capital_discount': float(cap_product.get('DISCOUNT') or 0),
+                    'capital_maxdiscount': float(cap_product.get('MAXDISCOUNT') or 0),
+                    
+                    'price_match': abs(regular_price - float(cap_product.get('RTLPRICE') or 0)) < 0.01,
+                }
+                
+                matched.append(matched_product)
+                
+                # Remove from unmatched capital
+                unmatched_capital = [p for p in unmatched_capital 
+                                     if str(p.get('CODE', '')).strip().upper() != sku]
+            else:
+                unmatched_woo.append(woo_product)
+                
+        return matched, unmatched_woo, unmatched_capital
+
+
+# ============================================================================
+# DATABASE FOR CACHING AND ANALYTICS
+# ============================================================================
+
+class LocalDatabase:
+    """SQLite database for caching and analytics"""
+    
+    def __init__(self, db_path="bridge_data.db"):
+        self.db_path = db_path
+        self.init_database()
+        
+    def init_database(self):
+        """Initialize database tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Product sales history
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS product_sales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                product_name TEXT,
+                order_id INTEGER,
+                order_date TEXT,
+                quantity INTEGER,
+                price REAL,
+                total REAL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Price history
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                regular_price REAL,
+                sale_price REAL,
+                recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Update logs
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS update_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT,
+                field_updated TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+    def record_price_history(self, sku, regular_price, sale_price):
+        """Record price change"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO price_history (sku, regular_price, sale_price)
+            VALUES (?, ?, ?)
+        ''', (sku, regular_price, sale_price))
+        conn.commit()
+        conn.close()
+        
+    def record_update(self, sku, field, old_value, new_value):
+        """Record an update"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO update_logs (sku, field_updated, old_value, new_value)
+            VALUES (?, ?, ?, ?)
+        ''', (sku, field, str(old_value), str(new_value)))
+        conn.commit()
+        conn.close()
+        
+    def get_price_history(self, sku, days=90):
+        """Get price history for a product"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cursor.execute('''
+            SELECT regular_price, sale_price, recorded_at
+            FROM price_history
+            WHERE sku = ? AND recorded_at >= ?
+            ORDER BY recorded_at
+        ''', (sku, cutoff))
+        
+        results = cursor.fetchall()
+        conn.close()
+        return results
+
+
+# ============================================================================
+# MAIN APPLICATION
+# ============================================================================
+
+class BridgeApp(ctk.CTk):
+    """Main Bridge Application Window"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        self.title("BRIDGE - WooCommerce & Capital ERP Product Manager")
+        self.geometry("1600x900")
+        self.minsize(1200, 700)
+        
+        # Initialize clients
+        self.woo_client = WooCommerceClient(WOOCOMMERCE_CONFIG)
+        self.capital_client = CapitalClient(CAPITAL_CONFIG)
+        self.db = LocalDatabase()
+        
+        # Setup UI
+        self.setup_ui()
+        
+        # Register for data updates
+        data_store.add_data_listener(self.on_data_updated)
+        data_store.add_loading_listener(self.on_loading_updated)
+        
+    def setup_ui(self):
+        """Setup the main UI"""
+        # Configure grid
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        
+        # Top bar with status and controls
+        self.create_top_bar()
+        
+        # Main content area with tabs
+        self.create_main_content()
+        
+        # Status bar at bottom
+        self.create_status_bar()
+        
+    def create_top_bar(self):
+        """Create top bar with controls"""
+        top_frame = ctk.CTkFrame(self, height=60)
+        top_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        top_frame.grid_columnconfigure(1, weight=1)
+        
+        # Title
+        title_label = ctk.CTkLabel(
+            top_frame, 
+            text="🌉 BRIDGE", 
+            font=ctk.CTkFont(size=24, weight="bold")
+        )
+        title_label.grid(row=0, column=0, padx=20, pady=10)
+        
+        # Subtitle
+        subtitle_label = ctk.CTkLabel(
+            top_frame, 
+            text="WooCommerce & Capital ERP Product Manager",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        subtitle_label.grid(row=0, column=1, padx=10, pady=10, sticky="w")
+        
+        # Fetch data button
+        self.fetch_btn = ctk.CTkButton(
+            top_frame,
+            text="📥 Fetch All Data",
+            command=self.start_data_fetch,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            width=150
+        )
+        self.fetch_btn.grid(row=0, column=2, padx=10, pady=10)
+        
+        # Last fetch time
+        self.last_fetch_label = ctk.CTkLabel(
+            top_frame,
+            text="Not fetched yet",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.last_fetch_label.grid(row=0, column=3, padx=20, pady=10)
+        
+    def create_main_content(self):
+        """Create main content area with tabview"""
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        
+        # Create tabs
+        self.tab_overview = self.tabview.add("📊 Overview")
+        self.tab_products = self.tabview.add("📦 Products")
+        self.tab_prices = self.tabview.add("💰 Prices & Discounts")
+        self.tab_unmatched = self.tabview.add("🔗 Unmatched")
+        self.tab_analytics = self.tabview.add("📈 Analytics")
+        self.tab_logs = self.tabview.add("📋 Logs")
+        
+        # Initialize tab content
+        self.setup_overview_tab()
+        self.setup_products_tab()
+        self.setup_prices_tab()
+        self.setup_unmatched_tab()
+        self.setup_analytics_tab()
+        self.setup_logs_tab()
+        
+    def create_status_bar(self):
+        """Create status bar at bottom"""
+        status_frame = ctk.CTkFrame(self, height=40)
+        status_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(5, 10))
+        status_frame.grid_columnconfigure(1, weight=1)
+        
+        # Progress bar
+        self.progress_bar = ctk.CTkProgressBar(status_frame, width=200)
+        self.progress_bar.grid(row=0, column=0, padx=10, pady=10)
+        self.progress_bar.set(0)
+        
+        # Status message
+        self.status_label = ctk.CTkLabel(
+            status_frame,
+            text="Ready",
+            font=ctk.CTkFont(size=12)
+        )
+        self.status_label.grid(row=0, column=1, padx=10, pady=10, sticky="w")
+        
+        # Product counts
+        self.counts_label = ctk.CTkLabel(
+            status_frame,
+            text="WOO: 0 | CAPITAL: 0 | MATCHED: 0",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        self.counts_label.grid(row=0, column=2, padx=20, pady=10)
+        
+    # ========================================================================
+    # OVERVIEW TAB
+    # ========================================================================
+    
+    def setup_overview_tab(self):
+        """Setup overview tab with dashboard"""
+        self.tab_overview.grid_columnconfigure(0, weight=1)
+        self.tab_overview.grid_columnconfigure(1, weight=1)
+        self.tab_overview.grid_rowconfigure(1, weight=1)
+        
+        # Stats cards row
+        stats_frame = ctk.CTkFrame(self.tab_overview)
+        stats_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
+        
+        # WooCommerce card
+        self.woo_card = self.create_stat_card(stats_frame, "WooCommerce Products", "0", "🛒")
+        self.woo_card.grid(row=0, column=0, padx=10, pady=10)
+        
+        # Capital card
+        self.capital_card = self.create_stat_card(stats_frame, "Capital Products", "0", "🏢")
+        self.capital_card.grid(row=0, column=1, padx=10, pady=10)
+        
+        # Matched card
+        self.matched_card = self.create_stat_card(stats_frame, "Matched Products", "0", "✅")
+        self.matched_card.grid(row=0, column=2, padx=10, pady=10)
+        
+        # Price mismatches card
+        self.mismatch_card = self.create_stat_card(stats_frame, "Price Mismatches", "0", "⚠️")
+        self.mismatch_card.grid(row=0, column=3, padx=10, pady=10)
+        
+        # Recent activity
+        activity_frame = ctk.CTkFrame(self.tab_overview)
+        activity_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        
+        activity_label = ctk.CTkLabel(
+            activity_frame,
+            text="📋 Recent Updates",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        activity_label.pack(pady=10)
+        
+        self.activity_text = ctk.CTkTextbox(activity_frame, width=400, height=300)
+        self.activity_text.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Quick actions
+        actions_frame = ctk.CTkFrame(self.tab_overview)
+        actions_frame.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
+        
+        actions_label = ctk.CTkLabel(
+            actions_frame,
+            text="⚡ Quick Actions",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        actions_label.pack(pady=10)
+        
+        ctk.CTkButton(
+            actions_frame,
+            text="🔄 Sync Prices from Capital",
+            command=self.sync_prices_from_capital,
+            width=250
+        ).pack(pady=5)
+        
+        ctk.CTkButton(
+            actions_frame,
+            text="📊 View Price Mismatches",
+            command=lambda: self.tabview.set("💰 Prices & Discounts"),
+            width=250
+        ).pack(pady=5)
+        
+        ctk.CTkButton(
+            actions_frame,
+            text="🔗 Match Unmatched Products",
+            command=lambda: self.tabview.set("🔗 Unmatched"),
+            width=250
+        ).pack(pady=5)
+        
+    def create_stat_card(self, parent, title, value, icon):
+        """Create a statistics card"""
+        card = ctk.CTkFrame(parent, width=180, height=100)
+        card.grid_propagate(False)
+        
+        icon_label = ctk.CTkLabel(card, text=icon, font=ctk.CTkFont(size=24))
+        icon_label.pack(pady=(10, 0))
+        
+        value_label = ctk.CTkLabel(
+            card, 
+            text=value, 
+            font=ctk.CTkFont(size=28, weight="bold")
+        )
+        value_label.pack()
+        
+        title_label = ctk.CTkLabel(
+            card, 
+            text=title, 
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        title_label.pack()
+        
+        # Store reference to value label for updates
+        card.value_label = value_label
+        
+        return card
+        
+    # ========================================================================
+    # PRODUCTS TAB
+    # ========================================================================
+    
+    def setup_products_tab(self):
+        """Setup products management tab"""
+        self.tab_products.grid_columnconfigure(0, weight=1)
+        self.tab_products.grid_rowconfigure(1, weight=1)
+        
+        # Filters frame
+        filter_frame = ctk.CTkFrame(self.tab_products)
+        filter_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        
+        # Search by code/SKU
+        ctk.CTkLabel(filter_frame, text="SKU/Code:").grid(row=0, column=0, padx=5, pady=5)
+        self.product_sku_filter = ctk.CTkEntry(filter_frame, width=150)
+        self.product_sku_filter.grid(row=0, column=1, padx=5, pady=5)
+        
+        # Search by name
+        ctk.CTkLabel(filter_frame, text="Name:").grid(row=0, column=2, padx=5, pady=5)
+        self.product_name_filter = ctk.CTkEntry(filter_frame, width=200)
+        self.product_name_filter.grid(row=0, column=3, padx=5, pady=5)
+        
+        # Category filter
+        ctk.CTkLabel(filter_frame, text="Category:").grid(row=0, column=4, padx=5, pady=5)
+        self.product_category_filter = ctk.CTkComboBox(
+            filter_frame, 
+            width=180,
+            values=["All Categories"]
+        )
+        self.product_category_filter.grid(row=0, column=5, padx=5, pady=5)
+        self.product_category_filter.set("All Categories")
+        
+        # Filter button
+        ctk.CTkButton(
+            filter_frame,
+            text="🔍 Filter",
+            command=self.filter_products,
+            width=100
+        ).grid(row=0, column=6, padx=10, pady=5)
+        
+        # Clear filter button
+        ctk.CTkButton(
+            filter_frame,
+            text="❌ Clear",
+            command=self.clear_product_filters,
+            width=80
+        ).grid(row=0, column=7, padx=5, pady=5)
+        
+        # Products treeview
+        tree_frame = ctk.CTkFrame(self.tab_products)
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        
+        # Create treeview with scrollbars
+        columns = (
+            "SKU", "Name", "WOO Price", "Capital Price", 
+            "Sale Price", "Discount %", "Stock", "Total Sales", "Match"
+        )
+        
+        self.products_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        
+        # Configure columns
+        self.products_tree.heading("SKU", text="SKU")
+        self.products_tree.heading("Name", text="Product Name")
+        self.products_tree.heading("WOO Price", text="WOO Price €")
+        self.products_tree.heading("Capital Price", text="Capital Price €")
+        self.products_tree.heading("Sale Price", text="Sale Price €")
+        self.products_tree.heading("Discount %", text="Discount %")
+        self.products_tree.heading("Stock", text="Stock")
+        self.products_tree.heading("Total Sales", text="Sales")
+        self.products_tree.heading("Match", text="Match")
+        
+        self.products_tree.column("SKU", width=120)
+        self.products_tree.column("Name", width=300)
+        self.products_tree.column("WOO Price", width=100)
+        self.products_tree.column("Capital Price", width=100)
+        self.products_tree.column("Sale Price", width=100)
+        self.products_tree.column("Discount %", width=80)
+        self.products_tree.column("Stock", width=60)
+        self.products_tree.column("Total Sales", width=60)
+        self.products_tree.column("Match", width=60)
+        
+        # Scrollbars
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.products_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.products_tree.xview)
+        self.products_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        self.products_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        # Bind double-click to edit
+        self.products_tree.bind("<Double-1>", self.on_product_double_click)
+        
+        # Selection count label
+        self.selection_label = ctk.CTkLabel(
+            self.tab_products,
+            text="Select products to edit",
+            font=ctk.CTkFont(size=12)
+        )
+        self.selection_label.grid(row=2, column=0, padx=10, pady=5, sticky="w")
+        
+    def filter_products(self):
+        """Filter products based on criteria"""
+        sku_filter = self.product_sku_filter.get().strip().upper()
+        name_filter = self.product_name_filter.get().strip().lower()
+        category_filter = self.product_category_filter.get()
+        
+        # Clear current items
+        for item in self.products_tree.get_children():
+            self.products_tree.delete(item)
+            
+        # Filter and display
+        for product in data_store.matched_products:
+            sku = product.get('sku', '')
+            name = product.get('woo_name', '')
+            categories = product.get('woo_categories', [])
+            
+            # Apply filters
+            if sku_filter and sku_filter not in sku.upper():
+                continue
+            if name_filter and name_filter not in name.lower():
+                continue
+            if category_filter != "All Categories":
+                if category_filter not in categories:
+                    continue
+                    
+            # Add to treeview
+            match_status = "✅" if product.get('price_match') else "❌"
+            
+            self.products_tree.insert("", "end", values=(
+                sku,
+                name[:50] + "..." if len(name) > 50 else name,
+                f"{product.get('woo_regular_price', 0):.2f}",
+                f"{product.get('capital_rtlprice', 0):.2f}",
+                f"{product.get('woo_sale_price', 0):.2f}" if product.get('woo_sale_price') else "-",
+                f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') else "-",
+                product.get('woo_stock_quantity', '-'),
+                product.get('woo_total_sales', 0),
+                match_status
+            ))
+            
+    def clear_product_filters(self):
+        """Clear all product filters"""
+        self.product_sku_filter.delete(0, "end")
+        self.product_name_filter.delete(0, "end")
+        self.product_category_filter.set("All Categories")
+        self.filter_products()
+        
+    def on_product_double_click(self, event):
+        """Handle double-click on product to edit"""
+        selection = self.products_tree.selection()
+        if selection:
+            item = selection[0]
+            values = self.products_tree.item(item, "values")
+            sku = values[0]
+            self.open_product_editor(sku)
+            
+    # ========================================================================
+    # PRICES TAB
+    # ========================================================================
+    
+    def setup_prices_tab(self):
+        """Setup prices and discounts management tab"""
+        self.tab_prices.grid_columnconfigure(0, weight=1)
+        self.tab_prices.grid_rowconfigure(1, weight=1)
+        
+        # Controls frame
+        controls_frame = ctk.CTkFrame(self.tab_prices)
+        controls_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        
+        # Show only mismatches checkbox
+        self.show_mismatches_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            controls_frame,
+            text="Show only price mismatches",
+            variable=self.show_mismatches_var,
+            command=self.refresh_prices_table
+        ).grid(row=0, column=0, padx=10, pady=5)
+        
+        # Search
+        ctk.CTkLabel(controls_frame, text="Search:").grid(row=0, column=1, padx=5, pady=5)
+        self.price_search = ctk.CTkEntry(controls_frame, width=200)
+        self.price_search.grid(row=0, column=2, padx=5, pady=5)
+        self.price_search.bind("<Return>", lambda e: self.refresh_prices_table())
+        
+        # Search button
+        ctk.CTkButton(
+            controls_frame,
+            text="🔍 Search",
+            command=self.refresh_prices_table,
+            width=100
+        ).grid(row=0, column=3, padx=10, pady=5)
+        
+        # Batch actions
+        batch_frame = ctk.CTkFrame(self.tab_prices)
+        batch_frame.grid(row=0, column=0, sticky="e", padx=10, pady=10)
+        
+        # Prices treeview
+        tree_frame = ctk.CTkFrame(self.tab_prices)
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        
+        columns = (
+            "SKU", "Name", "WOO Regular", "Capital RTLPRICE", 
+            "Difference", "WOO Sale", "Discount %", "Action"
+        )
+        
+        self.prices_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        
+        self.prices_tree.heading("SKU", text="SKU")
+        self.prices_tree.heading("Name", text="Product Name")
+        self.prices_tree.heading("WOO Regular", text="WOO Regular €")
+        self.prices_tree.heading("Capital RTLPRICE", text="Capital €")
+        self.prices_tree.heading("Difference", text="Diff €")
+        self.prices_tree.heading("WOO Sale", text="Sale Price €")
+        self.prices_tree.heading("Discount %", text="Discount %")
+        self.prices_tree.heading("Action", text="Action")
+        
+        self.prices_tree.column("SKU", width=120)
+        self.prices_tree.column("Name", width=250)
+        self.prices_tree.column("WOO Regular", width=100)
+        self.prices_tree.column("Capital RTLPRICE", width=100)
+        self.prices_tree.column("Difference", width=80)
+        self.prices_tree.column("WOO Sale", width=100)
+        self.prices_tree.column("Discount %", width=80)
+        self.prices_tree.column("Action", width=100)
+        
+        # Scrollbars
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.prices_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.prices_tree.xview)
+        self.prices_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        self.prices_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        # Bind double-click
+        self.prices_tree.bind("<Double-1>", self.on_price_double_click)
+        
+        # Bottom actions
+        actions_frame = ctk.CTkFrame(self.tab_prices)
+        actions_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
+        
+        self.price_count_label = ctk.CTkLabel(
+            actions_frame,
+            text="0 products shown",
+            font=ctk.CTkFont(size=12)
+        )
+        self.price_count_label.grid(row=0, column=0, padx=10, pady=5)
+        
+        ctk.CTkButton(
+            actions_frame,
+            text="📥 Update Selected to Capital Price",
+            command=self.update_selected_to_capital_price,
+            fg_color="green"
+        ).grid(row=0, column=1, padx=10, pady=5)
+        
+    def refresh_prices_table(self):
+        """Refresh the prices table"""
+        # Clear current items
+        for item in self.prices_tree.get_children():
+            self.prices_tree.delete(item)
+            
+        show_mismatches = self.show_mismatches_var.get()
+        search_text = self.price_search.get().strip().lower()
+        
+        count = 0
+        for product in data_store.matched_products:
+            # Filter by mismatch
+            if show_mismatches and product.get('price_match'):
+                continue
+                
+            # Filter by search
+            if search_text:
+                if (search_text not in product.get('sku', '').lower() and 
+                    search_text not in product.get('woo_name', '').lower()):
+                    continue
+                    
+            woo_price = product.get('woo_regular_price', 0)
+            capital_price = product.get('capital_rtlprice', 0)
+            difference = woo_price - capital_price
+            
+            self.prices_tree.insert("", "end", values=(
+                product.get('sku', ''),
+                product.get('woo_name', '')[:40],
+                f"{woo_price:.2f}",
+                f"{capital_price:.2f}",
+                f"{difference:+.2f}",
+                f"{product.get('woo_sale_price', 0):.2f}" if product.get('woo_sale_price') else "-",
+                f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') else "-",
+                "Edit"
+            ))
+            count += 1
+            
+        self.price_count_label.configure(text=f"{count} products shown")
+        
+    def on_price_double_click(self, event):
+        """Handle double-click on price row"""
+        selection = self.prices_tree.selection()
+        if selection:
+            item = selection[0]
+            values = self.prices_tree.item(item, "values")
+            sku = values[0]
+            self.open_price_editor(sku)
+            
+    def update_selected_to_capital_price(self):
+        """Update selected products to Capital price"""
+        selection = self.prices_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select products to update")
+            return
+            
+        if not messagebox.askyesno("Confirm", f"Update {len(selection)} products to Capital price?"):
+            return
+            
+        updates = []
+        for item in selection:
+            values = self.prices_tree.item(item, "values")
+            sku = values[0]
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                updates.append({
+                    "id": product['woo_id'],
+                    "regular_price": str(product['capital_rtlprice'])
+                })
+                
+        if updates:
+            threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+            
+    def batch_update_prices(self, updates):
+        """Batch update prices in background thread"""
+        try:
+            data_store.set_loading(True, 0, "Updating prices...")
+            
+            # Process in batches of 50
+            batch_size = 50
+            for i in range(0, len(updates), batch_size):
+                batch = updates[i:i+batch_size]
+                self.woo_client.batch_update_products(batch)
+                
+                progress = min(100, int((i + len(batch)) / len(updates) * 100))
+                data_store.set_loading(True, progress, f"Updated {i + len(batch)}/{len(updates)} products")
+                
+                # Update local cache
+                for update in batch:
+                    data_store.update_woo_product_locally(update['id'], {
+                        'regular_price': update['regular_price']
+                    })
+                    
+            data_store.set_loading(False, 100, "Update complete!")
+            self.after(0, self.refresh_prices_table)
+            
+        except Exception as e:
+            data_store.set_loading(False, 0, f"Error: {str(e)}")
+            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            
+    # ========================================================================
+    # UNMATCHED TAB
+    # ========================================================================
+    
+    def setup_unmatched_tab(self):
+        """Setup unmatched products tab"""
+        self.tab_unmatched.grid_columnconfigure(0, weight=1)
+        self.tab_unmatched.grid_columnconfigure(1, weight=1)
+        self.tab_unmatched.grid_rowconfigure(1, weight=1)
+        
+        # Title
+        ctk.CTkLabel(
+            self.tab_unmatched,
+            text="Unmatched Products - Match WooCommerce products with Capital ERP",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).grid(row=0, column=0, columnspan=2, pady=10)
+        
+        # Left frame - Unmatched WooCommerce products
+        left_frame = ctk.CTkFrame(self.tab_unmatched)
+        left_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        left_frame.grid_rowconfigure(1, weight=1)
+        left_frame.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(
+            left_frame,
+            text="🛒 WooCommerce Products (No Capital Match)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).grid(row=0, column=0, pady=10)
+        
+        self.unmatched_woo_listbox = tk.Listbox(left_frame, width=50, height=20)
+        self.unmatched_woo_listbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        
+        # Right frame - Unmatched Capital products
+        right_frame = ctk.CTkFrame(self.tab_unmatched)
+        right_frame.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
+        right_frame.grid_rowconfigure(1, weight=1)
+        right_frame.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(
+            right_frame,
+            text="🏢 Capital Products (Not in WooCommerce)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).grid(row=0, column=0, pady=10)
+        
+        self.unmatched_capital_listbox = tk.Listbox(right_frame, width=50, height=20)
+        self.unmatched_capital_listbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        
+        # Match button
+        ctk.CTkButton(
+            self.tab_unmatched,
+            text="🔗 Match Selected Products",
+            command=self.match_selected_products
+        ).grid(row=2, column=0, columnspan=2, pady=10)
+        
+    def match_selected_products(self):
+        """Match selected products manually"""
+        woo_selection = self.unmatched_woo_listbox.curselection()
+        capital_selection = self.unmatched_capital_listbox.curselection()
+        
+        if not woo_selection or not capital_selection:
+            messagebox.showwarning("Warning", "Please select a product from each list to match")
+            return
+            
+        # Get selected items and show matching dialog
+        messagebox.showinfo("Info", "Manual matching feature - to be implemented based on your workflow")
+        
+    # ========================================================================
+    # ANALYTICS TAB
+    # ========================================================================
+    
+    def setup_analytics_tab(self):
+        """Setup analytics tab"""
+        self.tab_analytics.grid_columnconfigure(0, weight=1)
+        self.tab_analytics.grid_rowconfigure(1, weight=1)
+        
+        # Controls
+        controls_frame = ctk.CTkFrame(self.tab_analytics)
+        controls_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        
+        ctk.CTkLabel(controls_frame, text="Search SKU:").grid(row=0, column=0, padx=5, pady=5)
+        self.analytics_sku_entry = ctk.CTkEntry(controls_frame, width=150)
+        self.analytics_sku_entry.grid(row=0, column=1, padx=5, pady=5)
+        
+        ctk.CTkButton(
+            controls_frame,
+            text="📊 View Analytics",
+            command=self.view_product_analytics
+        ).grid(row=0, column=2, padx=10, pady=5)
+        
+        # Analytics content
+        self.analytics_content = ctk.CTkFrame(self.tab_analytics)
+        self.analytics_content.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        
+        # Top sellers
+        top_sellers_frame = ctk.CTkFrame(self.analytics_content)
+        top_sellers_frame.pack(fill="x", padx=10, pady=10)
+        
+        ctk.CTkLabel(
+            top_sellers_frame,
+            text="🏆 Top Selling Products",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=10)
+        
+        self.top_sellers_text = ctk.CTkTextbox(top_sellers_frame, height=200)
+        self.top_sellers_text.pack(fill="x", padx=10, pady=10)
+        
+        # Product details
+        details_frame = ctk.CTkFrame(self.analytics_content)
+        details_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        ctk.CTkLabel(
+            details_frame,
+            text="📦 Product Details",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=10)
+        
+        self.product_details_text = ctk.CTkTextbox(details_frame, height=300)
+        self.product_details_text.pack(fill="both", expand=True, padx=10, pady=10)
+        
+    def view_product_analytics(self):
+        """View analytics for a product"""
+        sku = self.analytics_sku_entry.get().strip().upper()
+        if not sku:
+            messagebox.showwarning("Warning", "Please enter a SKU")
+            return
+            
+        product = data_store.get_product_by_sku(sku)
+        if not product:
+            messagebox.showinfo("Not Found", f"No product found with SKU: {sku}")
+            return
+            
+        # Display product details
+        details = f"""
+=== Product Details for {sku} ===
+
+📦 Product Name: {product.get('woo_name', 'N/A')}
+🏷️ SKU: {product.get('sku', 'N/A')}
+
+💰 Pricing:
+  - WooCommerce Regular Price: €{product.get('woo_regular_price', 0):.2f}
+  - WooCommerce Sale Price: €{product.get('woo_sale_price', 0):.2f}
+  - Capital RTLPRICE: €{product.get('capital_rtlprice', 0):.2f}
+  - Discount: {product.get('woo_discount_percent', 0):.1f}%
+
+📊 Sales:
+  - Total Sales: {product.get('woo_total_sales', 0)} units
+
+📦 Stock:
+  - Stock Status: {product.get('woo_stock_status', 'N/A')}
+  - Stock Quantity: {product.get('woo_stock_quantity', 'N/A')}
+  - Capital TRMODE: {product.get('capital_trmode', 'N/A')}
+
+📁 Categories: {', '.join(product.get('woo_categories', []))}
+
+🔗 Link: {product.get('woo_permalink', 'N/A')}
+
+📅 Dates:
+  - Created: {product.get('woo_date_created', 'N/A')}
+  - Modified: {product.get('woo_date_modified', 'N/A')}
+"""
+        
+        self.product_details_text.delete("1.0", "end")
+        self.product_details_text.insert("1.0", details)
+        
+    # ========================================================================
+    # LOGS TAB
+    # ========================================================================
+    
+    def setup_logs_tab(self):
+        """Setup logs tab"""
+        self.tab_logs.grid_columnconfigure(0, weight=1)
+        self.tab_logs.grid_rowconfigure(0, weight=1)
+        
+        self.logs_text = ctk.CTkTextbox(self.tab_logs, wrap="word")
+        self.logs_text.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        
+        # Clear button
+        ctk.CTkButton(
+            self.tab_logs,
+            text="🗑️ Clear Logs",
+            command=lambda: self.logs_text.delete("1.0", "end")
+        ).grid(row=1, column=0, pady=10)
+        
+    def log(self, message):
+        """Add a log message"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] {message}\n"
+        self.logs_text.insert("end", log_entry)
+        self.logs_text.see("end")
+        
+    # ========================================================================
+    # DATA FETCHING
+    # ========================================================================
+    
+    def start_data_fetch(self):
+        """Start fetching data in background thread"""
+        if data_store.is_loading:
+            messagebox.showwarning("Warning", "Already fetching data...")
+            return
+            
+        self.fetch_btn.configure(state="disabled", text="⏳ Fetching...")
+        threading.Thread(target=self.fetch_all_data, daemon=True).start()
+        
+    def fetch_all_data(self):
+        """Fetch all data from WooCommerce and Capital"""
+        try:
+            data_store.set_loading(True, 0, "Starting data fetch...")
+            self.log("Starting data fetch...")
+            
+            # Fetch WooCommerce products
+            data_store.set_loading(True, 10, "Fetching WooCommerce products...")
+            self.log("Fetching WooCommerce products...")
+            
+            def woo_progress(progress, status):
+                data_store.set_loading(True, 10 + int(progress * 0.3), status)
+                
+            data_store.woo_products = self.woo_client.get_all_products(progress_callback=woo_progress)
+            self.log(f"Fetched {len(data_store.woo_products)} WooCommerce products")
+            
+            # Fetch WooCommerce categories
+            data_store.set_loading(True, 45, "Fetching categories...")
+            data_store.woo_categories = self.woo_client.get_categories()
+            self.log(f"Fetched {len(data_store.woo_categories)} categories")
+            
+            # Fetch WooCommerce orders (last 90 days)
+            data_store.set_loading(True, 50, "Fetching orders...")
+            self.log("Fetching WooCommerce orders...")
+            
+            after_date = (datetime.now() - timedelta(days=90)).isoformat()
+            
+            def order_progress(progress, status):
+                data_store.set_loading(True, 50 + int(progress * 0.2), status)
+                
+            data_store.woo_orders = self.woo_client.get_all_orders(
+                after=after_date,
+                progress_callback=order_progress
+            )
+            self.log(f"Fetched {len(data_store.woo_orders)} orders")
+            
+            # Fetch Capital products
+            data_store.set_loading(True, 75, "Fetching Capital ERP products...")
+            self.log("Fetching Capital ERP products...")
+            
+            data_store.capital_products = self.capital_client.get_products()
+            self.log(f"Fetched {len(data_store.capital_products)} Capital products")
+            
+            # Match products
+            data_store.set_loading(True, 90, "Matching products...")
+            self.log("Matching products...")
+            
+            matched, unmatched_woo, unmatched_capital = ProductMatcher.match_products(
+                data_store.woo_products,
+                data_store.capital_products
+            )
+            
+            data_store.matched_products = matched
+            data_store.unmatched_woo = unmatched_woo
+            data_store.unmatched_capital = unmatched_capital
+            
+            self.log(f"Matched: {len(matched)}, Unmatched WOO: {len(unmatched_woo)}, Unmatched Capital: {len(unmatched_capital)}")
+            
+            # Update fetch time
+            data_store.last_fetch_time = datetime.now()
+            
+            data_store.set_loading(False, 100, "Data fetch complete!")
+            self.log("Data fetch complete!")
+            
+            # Notify data changed
+            data_store.notify_data_changed()
+            
+        except Exception as e:
+            data_store.set_loading(False, 0, f"Error: {str(e)}")
+            self.log(f"Error fetching data: {str(e)}")
+            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            
+        finally:
+            self.after(0, lambda: self.fetch_btn.configure(state="normal", text="📥 Fetch All Data"))
+            
+    # ========================================================================
+    # EVENT HANDLERS
+    # ========================================================================
+    
+    def on_data_updated(self):
+        """Handle data update notification"""
+        self.after(0, self.refresh_all_ui)
+        
+    def on_loading_updated(self):
+        """Handle loading state update"""
+        self.after(0, self.update_loading_ui)
+        
+    def update_loading_ui(self):
+        """Update loading UI elements"""
+        self.progress_bar.set(data_store.load_progress / 100)
+        self.status_label.configure(text=data_store.load_status)
+        
+    def refresh_all_ui(self):
+        """Refresh all UI elements with current data"""
+        # Update counts
+        self.counts_label.configure(
+            text=f"WOO: {len(data_store.woo_products)} | CAPITAL: {len(data_store.capital_products)} | MATCHED: {len(data_store.matched_products)}"
+        )
+        
+        # Update last fetch time
+        if data_store.last_fetch_time:
+            self.last_fetch_label.configure(
+                text=f"Last fetch: {data_store.last_fetch_time.strftime('%H:%M:%S')}"
+            )
+            
+        # Update overview cards
+        self.woo_card.value_label.configure(text=str(len(data_store.woo_products)))
+        self.capital_card.value_label.configure(text=str(len(data_store.capital_products)))
+        self.matched_card.value_label.configure(text=str(len(data_store.matched_products)))
+        
+        # Count price mismatches
+        mismatches = sum(1 for p in data_store.matched_products if not p.get('price_match'))
+        self.mismatch_card.value_label.configure(text=str(mismatches))
+        
+        # Update category filter
+        categories = ["All Categories"] + sorted(set(
+            cat.get('name', '') for cat in data_store.woo_categories
+        ))
+        self.product_category_filter.configure(values=categories)
+        
+        # Refresh products table
+        self.filter_products()
+        
+        # Refresh prices table
+        self.refresh_prices_table()
+        
+        # Refresh unmatched lists
+        self.unmatched_woo_listbox.delete(0, "end")
+        for product in data_store.unmatched_woo[:100]:  # Limit to 100
+            sku = product.get('sku', 'No SKU')
+            name = product.get('name', 'No name')[:40]
+            self.unmatched_woo_listbox.insert("end", f"{sku} - {name}")
+            
+        self.unmatched_capital_listbox.delete(0, "end")
+        for product in data_store.unmatched_capital[:100]:  # Limit to 100
+            code = product.get('CODE', 'No CODE')
+            descr = product.get('DESCR', 'No descr')[:40]
+            self.unmatched_capital_listbox.insert("end", f"{code} - {descr}")
+            
+        # Update top sellers
+        self.update_top_sellers()
+        
+    def update_top_sellers(self):
+        """Update top sellers display"""
+        # Sort by total_sales
+        sorted_products = sorted(
+            data_store.matched_products,
+            key=lambda x: x.get('woo_total_sales', 0),
+            reverse=True
+        )[:20]
+        
+        self.top_sellers_text.delete("1.0", "end")
+        
+        text = "Top 20 Best Selling Products:\n\n"
+        for i, product in enumerate(sorted_products, 1):
+            text += f"{i}. {product.get('sku', 'N/A')} - {product.get('woo_name', 'N/A')[:40]}\n"
+            text += f"   Sales: {product.get('woo_total_sales', 0)} | Price: €{product.get('woo_regular_price', 0):.2f}\n\n"
+            
+        self.top_sellers_text.insert("1.0", text)
+        
+    # ========================================================================
+    # PRODUCT EDITORS
+    # ========================================================================
+    
+    def open_product_editor(self, sku):
+        """Open product editor dialog"""
+        product = data_store.get_product_by_sku(sku)
+        if not product:
+            messagebox.showerror("Error", f"Product not found: {sku}")
+            return
+            
+        ProductEditorDialog(self, product, self.woo_client, self.db)
+        
+    def open_price_editor(self, sku):
+        """Open price editor dialog"""
+        product = data_store.get_product_by_sku(sku)
+        if not product:
+            messagebox.showerror("Error", f"Product not found: {sku}")
+            return
+            
+        PriceEditorDialog(self, product, self.woo_client, self.db)
+        
+    def sync_prices_from_capital(self):
+        """Quick action to sync prices from Capital"""
+        mismatches = [p for p in data_store.matched_products if not p.get('price_match')]
+        
+        if not mismatches:
+            messagebox.showinfo("Info", "All prices are already synchronized!")
+            return
+            
+        if messagebox.askyesno("Confirm", f"Update {len(mismatches)} products to Capital prices?"):
+            updates = [{
+                "id": p['woo_id'],
+                "regular_price": str(p['capital_rtlprice'])
+            } for p in mismatches]
+            
+            threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+
+
+# ============================================================================
+# DIALOG WINDOWS
+# ============================================================================
+
+class ProductEditorDialog(ctk.CTkToplevel):
+    """Dialog for editing product details"""
+    
+    def __init__(self, parent, product, woo_client, db):
+        super().__init__(parent)
+        
+        self.product = product
+        self.woo_client = woo_client
+        self.db = db
+        
+        self.title(f"Edit Product: {product.get('sku', 'Unknown')}")
+        self.geometry("700x600")
+        self.transient(parent)
+        self.grab_set()
+        
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """Setup editor UI"""
+        # Product info
+        info_frame = ctk.CTkFrame(self)
+        info_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkLabel(
+            info_frame,
+            text=f"SKU: {self.product.get('sku', 'N/A')}",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=5)
+        
+        ctk.CTkLabel(
+            info_frame,
+            text=self.product.get('woo_name', 'No name'),
+            font=ctk.CTkFont(size=14)
+        ).pack(pady=5)
+        
+        # Form
+        form_frame = ctk.CTkFrame(self)
+        form_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # Regular price
+        ctk.CTkLabel(form_frame, text="Regular Price (€):").grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        self.regular_price_entry = ctk.CTkEntry(form_frame, width=150)
+        self.regular_price_entry.grid(row=0, column=1, padx=10, pady=10)
+        self.regular_price_entry.insert(0, str(self.product.get('woo_regular_price', '')))
+        
+        ctk.CTkLabel(
+            form_frame,
+            text=f"Capital: €{self.product.get('capital_rtlprice', 0):.2f}",
+            text_color="gray"
+        ).grid(row=0, column=2, padx=10, pady=10)
+        
+        # Sale price
+        ctk.CTkLabel(form_frame, text="Sale Price (€):").grid(row=1, column=0, padx=10, pady=10, sticky="w")
+        self.sale_price_entry = ctk.CTkEntry(form_frame, width=150)
+        self.sale_price_entry.grid(row=1, column=1, padx=10, pady=10)
+        if self.product.get('woo_sale_price'):
+            self.sale_price_entry.insert(0, str(self.product.get('woo_sale_price', '')))
+            
+        # Discount calculator
+        ctk.CTkButton(
+            form_frame,
+            text="Calculate Discount",
+            command=self.calculate_discount,
+            width=120
+        ).grid(row=1, column=2, padx=10, pady=10)
+        
+        # Short description
+        ctk.CTkLabel(form_frame, text="Short Description:").grid(row=2, column=0, padx=10, pady=10, sticky="nw")
+        self.short_desc_text = ctk.CTkTextbox(form_frame, width=400, height=80)
+        self.short_desc_text.grid(row=2, column=1, columnspan=2, padx=10, pady=10)
+        self.short_desc_text.insert("1.0", self.product.get('woo_short_description', ''))
+        
+        # Description
+        ctk.CTkLabel(form_frame, text="Description:").grid(row=3, column=0, padx=10, pady=10, sticky="nw")
+        self.desc_text = ctk.CTkTextbox(form_frame, width=400, height=150)
+        self.desc_text.grid(row=3, column=1, columnspan=2, padx=10, pady=10)
+        self.desc_text.insert("1.0", self.product.get('woo_description', ''))
+        
+        # Buttons
+        btn_frame = ctk.CTkFrame(self)
+        btn_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="💾 Save Changes",
+            command=self.save_changes,
+            fg_color="green"
+        ).pack(side="left", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="❌ Cancel",
+            command=self.destroy,
+            fg_color="gray"
+        ).pack(side="right", padx=10)
+        
+    def calculate_discount(self):
+        """Calculate sale price based on discount percentage"""
+        try:
+            regular = float(self.regular_price_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid regular price")
+            return
+            
+        discount = ctk.CTkInputDialog(
+            text="Enter discount percentage:",
+            title="Calculate Discount"
+        ).get_input()
+        
+        if discount:
+            try:
+                discount_pct = float(discount)
+                sale_price = regular * (1 - discount_pct / 100)
+                self.sale_price_entry.delete(0, "end")
+                self.sale_price_entry.insert(0, f"{sale_price:.2f}")
+            except ValueError:
+                messagebox.showerror("Error", "Invalid discount percentage")
+                
+    def save_changes(self):
+        """Save changes to WooCommerce"""
+        try:
+            data = {}
+            
+            # Price
+            regular_price = self.regular_price_entry.get().strip()
+            if regular_price:
+                data['regular_price'] = regular_price
+                
+            sale_price = self.sale_price_entry.get().strip()
+            data['sale_price'] = sale_price if sale_price else ""
+            
+            # Descriptions
+            short_desc = self.short_desc_text.get("1.0", "end").strip()
+            data['short_description'] = short_desc
+            
+            description = self.desc_text.get("1.0", "end").strip()
+            data['description'] = description
+            
+            # Update WooCommerce
+            self.woo_client.update_product(self.product['woo_id'], data)
+            
+            # Record in database
+            if 'regular_price' in data:
+                self.db.record_update(
+                    self.product['sku'],
+                    'regular_price',
+                    self.product.get('woo_regular_price'),
+                    data['regular_price']
+                )
+                
+            # Update local cache
+            data_store.update_woo_product_locally(self.product['woo_id'], data)
+            
+            messagebox.showinfo("Success", "Product updated successfully!")
+            self.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update: {str(e)}")
+
+
+class PriceEditorDialog(ctk.CTkToplevel):
+    """Dialog for quick price editing"""
+    
+    def __init__(self, parent, product, woo_client, db):
+        super().__init__(parent)
+        
+        self.product = product
+        self.woo_client = woo_client
+        self.db = db
+        
+        self.title(f"Edit Price: {product.get('sku', 'Unknown')}")
+        self.geometry("500x400")
+        self.transient(parent)
+        self.grab_set()
+        
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """Setup price editor UI"""
+        # Product info
+        ctk.CTkLabel(
+            self,
+            text=f"SKU: {self.product.get('sku', 'N/A')}",
+            font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(pady=10)
+        
+        ctk.CTkLabel(
+            self,
+            text=self.product.get('woo_name', 'No name')[:50],
+            font=ctk.CTkFont(size=12)
+        ).pack(pady=5)
+        
+        # Price comparison
+        compare_frame = ctk.CTkFrame(self)
+        compare_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkLabel(
+            compare_frame,
+            text=f"WooCommerce Price: €{self.product.get('woo_regular_price', 0):.2f}",
+            font=ctk.CTkFont(size=14)
+        ).pack(pady=5)
+        
+        ctk.CTkLabel(
+            compare_frame,
+            text=f"Capital Price: €{self.product.get('capital_rtlprice', 0):.2f}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="green"
+        ).pack(pady=5)
+        
+        # New price entry
+        entry_frame = ctk.CTkFrame(self)
+        entry_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkLabel(entry_frame, text="New Regular Price (€):").pack(pady=5)
+        self.price_entry = ctk.CTkEntry(entry_frame, width=150)
+        self.price_entry.pack(pady=5)
+        self.price_entry.insert(0, str(self.product.get('capital_rtlprice', '')))
+        
+        ctk.CTkLabel(entry_frame, text="New Sale Price (€):").pack(pady=5)
+        self.sale_entry = ctk.CTkEntry(entry_frame, width=150)
+        self.sale_entry.pack(pady=5)
+        if self.product.get('woo_sale_price'):
+            self.sale_entry.insert(0, str(self.product.get('woo_sale_price', '')))
+            
+        # Quick buttons
+        quick_frame = ctk.CTkFrame(self)
+        quick_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkButton(
+            quick_frame,
+            text="Use Capital Price",
+            command=self.use_capital_price
+        ).pack(side="left", padx=5)
+        
+        ctk.CTkButton(
+            quick_frame,
+            text="Clear Sale Price",
+            command=lambda: self.sale_entry.delete(0, "end")
+        ).pack(side="left", padx=5)
+        
+        # Save/Cancel
+        btn_frame = ctk.CTkFrame(self)
+        btn_frame.pack(fill="x", padx=20, pady=20)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="💾 Save",
+            command=self.save_price,
+            fg_color="green"
+        ).pack(side="left", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="❌ Cancel",
+            command=self.destroy,
+            fg_color="gray"
+        ).pack(side="right", padx=10)
+        
+    def use_capital_price(self):
+        """Set price to Capital price"""
+        self.price_entry.delete(0, "end")
+        self.price_entry.insert(0, str(self.product.get('capital_rtlprice', '')))
+        
+    def save_price(self):
+        """Save price changes"""
+        try:
+            data = {}
+            
+            price = self.price_entry.get().strip()
+            if price:
+                data['regular_price'] = price
+                
+            sale = self.sale_entry.get().strip()
+            data['sale_price'] = sale if sale else ""
+            
+            self.woo_client.update_product(self.product['woo_id'], data)
+            
+            # Record history
+            if 'regular_price' in data:
+                self.db.record_price_history(
+                    self.product['sku'],
+                    float(data.get('regular_price', 0)),
+                    float(data.get('sale_price', 0)) if data.get('sale_price') else 0
+                )
+                
+            # Update local cache
+            data_store.update_woo_product_locally(self.product['woo_id'], data)
+            
+            messagebox.showinfo("Success", "Price updated!")
+            self.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update: {str(e)}")
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+if __name__ == "__main__":
+    app = BridgeApp()
+    app.mainloop()
