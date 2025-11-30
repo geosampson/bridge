@@ -1116,9 +1116,37 @@ class BridgeApp(ctk.CTk):
             width=100
         ).grid(row=0, column=3, padx=10, pady=5)
         
-        # Batch actions
-        batch_frame = ctk.CTkFrame(self.tab_prices)
-        batch_frame.grid(row=0, column=0, sticky="e", padx=10, pady=10)
+        # Group update panel (similar to Products tab)
+        group_update_frame = ctk.CTkFrame(self.tab_prices)
+        group_update_frame.grid(row=0, column=0, sticky="e", padx=10, pady=(50, 0))
+        
+        ctk.CTkLabel(
+            group_update_frame,
+            text="Group Update (Checked Products):",
+            font=ctk.CTkFont(size=12, weight="bold")
+        ).grid(row=0, column=0, padx=5, pady=5, columnspan=3)
+        
+        # Discount update
+        ctk.CTkLabel(group_update_frame, text="Set Discount (%):").grid(row=1, column=0, padx=5, pady=5)
+        self.prices_group_discount_entry = ctk.CTkEntry(group_update_frame, width=100, placeholder_text="e.g., 15")
+        self.prices_group_discount_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ctk.CTkButton(
+            group_update_frame,
+            text="🏷️ Apply Discount",
+            command=self.apply_discount_to_checked,
+            width=120,
+            fg_color="orange"
+        ).grid(row=1, column=2, padx=5, pady=5)
+        
+        # Sync to Capital button
+        ctk.CTkButton(
+            group_update_frame,
+            text="🔄 Sync Checked to Capital",
+            command=self.sync_checked_to_capital,
+            width=250,
+            fg_color="blue"
+        ).grid(row=2, column=0, columnspan=3, padx=5, pady=5)
         
         # Prices treeview
         tree_frame = ctk.CTkFrame(self.tab_prices)
@@ -1182,7 +1210,7 @@ class BridgeApp(ctk.CTk):
         
         ctk.CTkButton(
             actions_frame,
-            text="📥 Update Selected to Capital Price",
+            text="📥 Update Checked to Capital Price",
             command=self.update_selected_to_capital_price,
             fg_color="green"
         ).grid(row=0, column=1, padx=10, pady=5)
@@ -1303,6 +1331,77 @@ class BridgeApp(ctk.CTk):
                     "regular_price": str(product['capital_rtlprice'])
                 })
                 
+        if updates:
+            threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+            
+    def apply_discount_to_checked(self):
+        """Apply discount percentage to all checked products in Prices tab"""
+        discount_str = self.prices_group_discount_entry.get().strip()
+        if not discount_str:
+            messagebox.showwarning("Warning", "Please enter a discount percentage")
+            return
+            
+        try:
+            discount_percent = float(discount_str)
+            if discount_percent < 0 or discount_percent > 100:
+                raise ValueError("Discount must be between 0 and 100")
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid discount: {str(e)}")
+            return
+            
+        # Get all checked items
+        checked_items = [item_id for item_id, checked in self.price_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to update")
+            return
+            
+        if not messagebox.askyesno("Confirm", f"Apply {discount_percent}% discount to {len(checked_items)} checked products?"):
+            return
+            
+        updates = []
+        for item in checked_items:
+            values = self.prices_tree.item(item, "values")
+            sku = values[1]  # SKU is now in column 1 (after checkbox)
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                regular_price = product.get('woo_regular_price', 0)
+                if regular_price > 0:
+                    sale_price = regular_price * (1 - discount_percent / 100)
+                    updates.append({
+                        "id": product['woo_id'],
+                        "sale_price": f"{sale_price:.2f}"
+                    })
+                    
+        if updates:
+            threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+            self.prices_group_discount_entry.delete(0, "end")
+            
+    def sync_checked_to_capital(self):
+        """Sync checked products to Capital prices in Prices tab"""
+        # Get all checked items
+        checked_items = [item_id for item_id, checked in self.price_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to update")
+            return
+            
+        if not messagebox.askyesno("Confirm", f"Sync {len(checked_items)} checked products to Capital prices?"):
+            return
+            
+        updates = []
+        for item in checked_items:
+            values = self.prices_tree.item(item, "values")
+            sku = values[1]  # SKU is now in column 1 (after checkbox)
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                capital_price = product.get('capital_rtlprice')
+                if capital_price:
+                    updates.append({
+                        "id": product['woo_id'],
+                        "regular_price": str(capital_price)
+                    })
+                    
         if updates:
             threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
             
@@ -1802,18 +1901,8 @@ class BridgeApp(ctk.CTk):
         # Refresh prices table
         self.refresh_prices_table()
         
-        # Refresh unmatched lists
-        self.unmatched_woo_listbox.delete(0, "end")
-        for product in data_store.unmatched_woo[:100]:  # Limit to 100
-            sku = product.get('sku', 'No SKU')
-            name = product.get('name', 'No name')[:40]
-            self.unmatched_woo_listbox.insert("end", f"{sku} - {name}")
-            
-        self.unmatched_capital_listbox.delete(0, "end")
-        for product in data_store.unmatched_capital[:100]:  # Limit to 100
-            code = product.get('CODE', 'No CODE')
-            descr = product.get('DESCR', 'No descr')[:40]
-            self.unmatched_capital_listbox.insert("end", f"{code} - {descr}")
+        # Refresh unmatched products (now using tree views with search)
+        self.filter_unmatched_products()
             
         # Update top sellers
         self.update_top_sellers()

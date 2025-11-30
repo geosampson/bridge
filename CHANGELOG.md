@@ -1,5 +1,60 @@
 # BRIDGE - Changelog
 
+## Version 2.1 - Bug Fixes & Enhancements (2025-11-30)
+
+### 🐛 Bug Fixes
+
+#### Unmatched Products Display
+- **Fixed:** Unmatched products now display properly in the tree views
+- **Fixed:** All unmatched products (not just first 100) are now shown
+- Changed from old listbox implementation to new tree view with search
+- Unmatched products automatically populate when data is fetched
+
+#### Group Update in Prices & Discounts Tab
+- **Added:** Group discount update functionality to Prices & Discounts tab
+- **Added:** "Sync Checked to Capital" button for bulk price sync
+- Now you can apply discounts or sync prices directly from the Prices tab
+- Works with checkbox selection for maximum flexibility
+
+### ✨ New Features
+
+#### Prices & Discounts Tab - Group Update Panel
+- **Set Discount (%):** Apply percentage discount to all checked products
+- **Sync Checked to Capital:** Update all checked products to Capital prices
+- Complements the existing "Update Checked to Capital Price" button
+- All operations work with checkbox selection and drag-to-select
+
+### 📋 Summary of Changes
+
+**What's Fixed:**
+1. Unmatched products tab now shows ALL unmatched products (978 WooCommerce + 37,141 Capital)
+2. Search functionality works immediately after data fetch
+3. No more manual refresh needed to see unmatched products
+
+**What's Added:**
+1. Group discount application in Prices & Discounts tab
+2. Sync to Capital button in Prices & Discounts tab
+3. Better consistency between Products tab and Prices tab
+
+### 🎯 Usage Examples
+
+#### Apply 20% Discount to Price Mismatches
+1. Go to **Prices & Discounts** tab
+2. Check "Show only price mismatches" (default)
+3. Click checkbox header to select all
+4. Enter "20" in "Set Discount (%)" field
+5. Click "🏷️ Apply Discount"
+6. Confirm → All mismatched products now have 20% discount
+
+#### Sync All Mismatched Prices to Capital
+1. Go to **Prices & Discounts** tab
+2. Check "Show only price mismatches"
+3. Click checkbox header to select all
+4. Click "🔄 Sync Checked to Capital"
+5. Confirm → All prices synced!
+
+---
+
 ## Version 2.0 - Enhanced Features (2025-11-30)
 
 ### 🎯 Major Improvements
