@@ -18,13 +18,14 @@ Author: Roussakis Supplies IKE
 
 import customtkinter as ctk
 from tkinter import ttk, messagebox
-import tkinter as tk
 import requests
 from requests.auth import HTTPBasicAuth
-import urllib3
+import pyodbc
 import threading
 from datetime import datetime, timedelta
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import sqlite3
 import os
 from collections import defaultdict
@@ -613,7 +614,24 @@ class BridgeApp(ctk.CTk):
         )
         self.fetch_btn.grid(row=0, column=2, padx=10, pady=10)
         
-        # Last fetch time
+        # Checkbox for including variations (add to top frame)
+        self.fetch_variations_var = ctk.BooleanVar(value=False)  # Default to False for speed
+        variations_checkbox = ctk.CTkCheckBox(
+            top_frame,
+            text="Include variations (slower)",
+            variable=self.fetch_variations_var,
+            font=ctk.CTkFont(size=11)
+        )
+        variations_checkbox.grid(row=0, column=3, padx=10, pady=10)
+        
+        # Tooltip for variations checkbox
+        ctk.CTkLabel(
+            top_frame,
+            text="⚠️ Variations add ~5-10 min (parallel mode)",
+            text_color="orange",
+            font=ctk.CTkFont(size=9)
+        ).grid(row=1, column=3, padx=10, pady=0)
+        
         self.last_fetch_label = ctk.CTkLabel(
             top_frame,
             text="Not fetched yet",
@@ -1791,48 +1809,67 @@ class BridgeApp(ctk.CTk):
             data_store.woo_products = self.woo_client.get_all_products(progress_callback=woo_progress)
             self.log(f"Fetched {len(data_store.woo_products)} WooCommerce products")
             
-            # Fetch product variations for variable products
-            data_store.set_loading(True, 40, "Fetching product variations...")
-            self.log("Fetching product variations...")
-            
-            variation_count = 0
-            variable_products = [p for p in data_store.woo_products if p.get('type') == 'variable']
-            
-            for idx, product in enumerate(variable_products):
-                variations = self.woo_client.get_product_variations(product['id'])
-                if variations:
-                    # Add variations as separate products with parent SKU reference
-                    for variation in variations:
-                        # Create a variation product entry
-                        variation_product = {
-                            'id': variation['id'],
-                            'parent_id': product['id'],
-                            'name': f"{product['name']} - {', '.join([attr['option'] for attr in variation.get('attributes', [])])}",
-                            'sku': variation.get('sku', ''),
-                            'regular_price': variation.get('regular_price', ''),
-                            'sale_price': variation.get('sale_price', ''),
-                            'description': variation.get('description', ''),
-                            'short_description': product.get('short_description', ''),
-                            'categories': product.get('categories', []),
-                            'stock_status': variation.get('stock_status', ''),
-                            'stock_quantity': variation.get('stock_quantity', ''),
-                            'permalink': variation.get('permalink', ''),
-                            'date_created': variation.get('date_created', ''),
-                            'date_modified': variation.get('date_modified', ''),
-                            'total_sales': product.get('total_sales', 0),
-                            'attributes': variation.get('attributes', []),
-                            'is_variation': True
-                        }
-                        # Only add if variation has a SKU
-                        if variation_product['sku']:
-                            data_store.woo_products.append(variation_product)
-                            variation_count += 1
-                            
-                if (idx + 1) % 10 == 0:  # Update progress every 10 products
-                    progress = int((idx + 1) / len(variable_products) * 100)
-                    data_store.set_loading(True, 40 + int(progress * 0.05), f"Fetching variations... {idx + 1}/{len(variable_products)}")
+            # Fetch product variations for variable products (only if enabled)
+            if self.fetch_variations_var.get():
+                data_store.set_loading(True, 40, "Fetching product variations (parallel)...")
+                self.log("Fetching product variations in parallel...")
+                
+                variation_count = 0
+                variable_products = [p for p in data_store.woo_products if p.get('type') == 'variable']
+                
+                # Parallel fetching with ThreadPoolExecutor
+                def fetch_variations_for_product(product):
+                    """Fetch variations for a single product"""
+                    try:
+                        variations = self.woo_client.get_product_variations(product['id'])
+                        result = []
+                        if variations:
+                            for variation in variations:
+                                variation_product = {
+                                    'id': variation['id'],
+                                    'parent_id': product['id'],
+                                    'name': f"{product['name']} - {', '.join([attr['option'] for attr in variation.get('attributes', [])])}",
+                                    'sku': variation.get('sku', ''),
+                                    'regular_price': variation.get('regular_price', ''),
+                                    'sale_price': variation.get('sale_price', ''),
+                                    'stock_quantity': variation.get('stock_quantity'),
+                                    'stock_status': variation.get('stock_status'),
+                                    'description': variation.get('description', ''),
+                                    'short_description': product.get('short_description', ''),
+                                    'categories': product.get('categories', []),
+                                    'permalink': variation.get('permalink', ''),
+                                    'date_created': variation.get('date_created', ''),
+                                    'date_modified': variation.get('date_modified', ''),
+                                    'total_sales': product.get('total_sales', 0),
+                                    'attributes': variation.get('attributes', []),
+                                    'is_variation': True
+                                }
+                                if variation_product['sku']:
+                                    result.append(variation_product)
+                        return result
+                    except Exception as e:
+                        self.log(f"Error fetching variations for product {product.get('id')}: {e}")
+                        return []
+                
+                # Use ThreadPoolExecutor for parallel fetching (10 concurrent threads)
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = {executor.submit(fetch_variations_for_product, product): product for product in variable_products}
                     
-            self.log(f"Fetched {variation_count} product variations from {len(variable_products)} variable products")
+                    completed = 0
+                    for future in as_completed(futures):
+                        variations = future.result()
+                        data_store.woo_products.extend(variations)
+                        variation_count += len(variations)
+                        
+                        completed += 1
+                        if completed % 10 == 0:  # Update progress every 10 products
+                            progress = int(completed / len(variable_products) * 100)
+                            data_store.set_loading(True, 40 + int(progress * 0.05), f"Fetching variations... {completed}/{len(variable_products)}")
+                        
+                self.log(f"Fetched {variation_count} product variations from {len(variable_products)} variable products (parallel mode)")
+            else:
+                self.log("Skipping product variations (checkbox not enabled)")
+                data_store.set_loading(True, 40, "Skipping variations...")
             
             # Fetch WooCommerce categories
             data_store.set_loading(True, 45, "Fetching categories...")
