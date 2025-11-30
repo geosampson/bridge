@@ -848,7 +848,7 @@ class BridgeApp(ctk.CTk):
         
         ctk.CTkLabel(
             group_update_frame,
-            text="Group Update (Filtered Products):",
+            text="Group Update (Checked Products):",
             font=ctk.CTkFont(size=12, weight="bold")
         ).grid(row=0, column=0, padx=5, pady=5, columnspan=4)
         
@@ -895,13 +895,17 @@ class BridgeApp(ctk.CTk):
         
         # Create treeview with scrollbars
         columns = (
-            "SKU", "Name", "WOO Price", "Capital Price", 
+            "☑", "SKU", "Name", "WOO Price", "Capital Price", 
             "Sale Price", "Discount %", "Stock", "Total Sales", "Match"
         )
         
         self.products_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         
+        # Track checkbox states
+        self.product_checkboxes = {}
+        
         # Configure columns
+        self.products_tree.heading("☑", text="☑", command=self.toggle_all_products)
         self.products_tree.heading("SKU", text="SKU")
         self.products_tree.heading("Name", text="Product Name")
         self.products_tree.heading("WOO Price", text="WOO Price €")
@@ -912,6 +916,7 @@ class BridgeApp(ctk.CTk):
         self.products_tree.heading("Total Sales", text="Sales")
         self.products_tree.heading("Match", text="Match")
         
+        self.products_tree.column("☑", width=30, anchor="center")
         self.products_tree.column("SKU", width=120)
         self.products_tree.column("Name", width=300)
         self.products_tree.column("WOO Price", width=100)
@@ -930,10 +935,9 @@ class BridgeApp(ctk.CTk):
         self.products_tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-        
-        # Bind double-click to edit
-        self.products_tree.bind("<Double-1>", self.on_product_double_click)
-        
+                # Click to toggle checkbox, double-click to edit
+        self.products_tree.bind("<Button-1>", self.on_product_click)
+        self.products_tree.bind("<Double-Button-1>", self.on_product_double_click)        
         # Selection count label
         self.selection_label = ctk.CTkLabel(
             self.tab_products,
@@ -976,7 +980,8 @@ class BridgeApp(ctk.CTk):
             # Add to treeview
             match_status = "✅" if product.get('price_match') else "❌"
             
-            self.products_tree.insert("", "end", values=(
+            item_id = self.products_tree.insert("", "end", values=(
+                "☐",  # Unchecked by default
                 sku,
                 name[:50] + "..." if len(name) > 50 else name,
                 f"{product.get('woo_regular_price', 0):.2f}",
@@ -987,6 +992,8 @@ class BridgeApp(ctk.CTk):
                 product.get('woo_total_sales', 0),
                 match_status
             ))
+            # Track checkbox state
+            self.product_checkboxes[item_id] = False
             
     def clear_product_filters(self):
         """Clear all product filters"""
@@ -1007,7 +1014,7 @@ class BridgeApp(ctk.CTk):
         return filtered_products
         
     def update_group_prices(self):
-        """Update prices for all filtered products"""
+        """Update prices for checked products"""
         price_str = self.group_price_entry.get().strip()
         if not price_str:
             messagebox.showwarning("Warning", "Please enter a price")
@@ -1018,27 +1025,38 @@ class BridgeApp(ctk.CTk):
         except ValueError:
             messagebox.showerror("Error", "Invalid price format")
             return
-            
-        filtered_products = self.get_filtered_products()
-        if not filtered_products:
-            messagebox.showwarning("Warning", "No products in current filter")
+        
+        # Get checked products
+        checked_items = [item_id for item_id, checked in self.product_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to update")
             return
             
-        if not messagebox.askyesno("Confirm", f"Update {len(filtered_products)} filtered products to €{price:.2f}?"):
+        if not messagebox.askyesno("Confirm", f"Update {len(checked_items)} checked products to €{price:.2f}?"):
             return
             
         updates = []
-        for product in filtered_products:
-            updates.append({
-                "id": product['woo_id'],
-                "regular_price": str(price)
-            })
+        for item in checked_items:
+            values = self.products_tree.item(item, "values")
+            sku = values[1]  # SKU is now in column 1 (after checkbox)
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                updates.append({
+                    "id": product['woo_id'],
+                    "regular_price": f"{price:.2f}"
+                })
+                self.log(f"Updating {sku}: regular_price={price:.2f}")
             
-        threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
-        self.group_price_entry.delete(0, "end")
+        if updates:
+            self.log(f"Updating {len(updates)} products to €{price:.2f}")
+            threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+            self.group_price_entry.delete(0, "end")
+        else:
+            messagebox.showwarning("Warning", "No valid products found to update")
         
     def update_group_discount(self):
-        """Apply discount percentage to all filtered products"""
+        """Apply discount percentage to checked products"""
         discount_str = self.group_discount_entry.get().strip()
         if not discount_str:
             messagebox.showwarning("Warning", "Please enter a discount percentage")
@@ -1051,50 +1069,67 @@ class BridgeApp(ctk.CTk):
         except ValueError as e:
             messagebox.showerror("Error", f"Invalid discount: {str(e)}")
             return
-            
-        filtered_products = self.get_filtered_products()
-        if not filtered_products:
-            messagebox.showwarning("Warning", "No products in current filter")
+        
+        # Get checked products
+        checked_items = [item_id for item_id, checked in self.product_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to update")
             return
             
-        if not messagebox.askyesno("Confirm", f"Apply {discount_percent}% discount to {len(filtered_products)} filtered products?"):
+        if not messagebox.askyesno("Confirm", f"Apply {discount_percent}% discount to {len(checked_items)} checked products?"):
             return
             
         updates = []
-        for product in filtered_products:
-            regular_price = product.get('woo_regular_price', 0)
-            if regular_price > 0:
-                sale_price = regular_price * (1 - discount_percent / 100)
-                updates.append({
-                    "id": product['woo_id'],
-                    "sale_price": f"{sale_price:.2f}"
-                })
+        for item in checked_items:
+            values = self.products_tree.item(item, "values")
+            sku = values[1]  # SKU is now in column 1 (after checkbox)
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                regular_price = product.get('woo_regular_price', 0)
+                if regular_price > 0:
+                    sale_price = regular_price * (1 - discount_percent / 100)
+                    updates.append({
+                        "id": product['woo_id'],
+                        "sale_price": f"{sale_price:.2f}"
+                    })
+                    self.log(f"Applying {discount_percent}% discount to {sku}: sale_price={sale_price:.2f}")
                 
-        threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
-        self.group_discount_entry.delete(0, "end")
+        if updates:
+            self.log(f"Applying {discount_percent}% discount to {len(updates)} products")
+            threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+            self.group_discount_entry.delete(0, "end")
+        else:
+            messagebox.showwarning("Warning", "No valid products found to update")
         
     def sync_filtered_to_capital(self):
-        """Sync filtered products to Capital prices"""
-        filtered_products = self.get_filtered_products()
-        if not filtered_products:
-            messagebox.showwarning("Warning", "No products in current filter")
+        """Sync checked products to Capital prices"""
+        # Get checked products
+        checked_items = [item_id for item_id, checked in self.product_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to sync")
             return
             
-        if not messagebox.askyesno("Confirm", f"Sync {len(filtered_products)} filtered products to Capital prices?"):
+        if not messagebox.askyesno("Confirm", f"Sync {len(checked_items)} checked products to Capital prices?"):
             return
             
         updates = []
-        for product in filtered_products:
-            capital_price = product.get('capital_rtlprice')
-            if capital_price and capital_price > 0:
-                # Ensure price is formatted correctly as string with 2 decimals
-                price_str = f"{float(capital_price):.2f}"
-                updates.append({
-                    "id": product['woo_id'],
-                    "regular_price": price_str,
-                    "sale_price": ""  # Clear sale price when syncing to Capital
-                })
-                self.log(f"Syncing {product.get('sku')}: regular_price={price_str}")
+        for item in checked_items:
+            values = self.products_tree.item(item, "values")
+            sku = values[1]  # SKU is now in column 1 (after checkbox)
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                capital_price = product.get('capital_rtlprice')
+                if capital_price and capital_price > 0:
+                    # Ensure price is formatted correctly as string with 2 decimals
+                    price_str = f"{float(capital_price):.2f}"
+                    updates.append({
+                        "id": product['woo_id'],
+                        "regular_price": price_str,
+                        "sale_price": ""  # Clear sale price when syncing to Capital
+                    })
+                    self.log(f"Syncing {sku}: regular_price={price_str}")
                 
         if updates:
             self.log(f"Syncing {len(updates)} products to Capital prices")
@@ -1102,14 +1137,58 @@ class BridgeApp(ctk.CTk):
         else:
             messagebox.showwarning("Warning", "No valid Capital prices found to sync")
         
+    def on_product_click(self, event):
+        """Handle click on product tree (for checkbox toggle)"""
+        region = self.products_tree.identify_region(event.x, event.y)
+        if region == "cell":
+            column = self.products_tree.identify_column(event.x)
+            item = self.products_tree.identify_row(event.y)
+            
+            # Check if clicked on checkbox column
+            if column == "#1" and item:  # First column is checkbox
+                # Toggle checkbox
+                current_state = self.product_checkboxes.get(item, False)
+                new_state = not current_state
+                self.product_checkboxes[item] = new_state
+                
+                # Update display
+                values = list(self.products_tree.item(item, "values"))
+                values[0] = "☑" if new_state else "☐"
+                self.products_tree.item(item, values=values)
+                
+                # Update selection count
+                checked_count = sum(1 for checked in self.product_checkboxes.values() if checked)
+                self.selection_label.configure(text=f"Selected: {checked_count} products")
+    
+    def toggle_all_products(self):
+        """Toggle all checkboxes in Products tab"""
+        # Check if any are checked
+        any_checked = any(self.product_checkboxes.values())
+        new_state = not any_checked
+        
+        # Update all checkboxes
+        for item in self.products_tree.get_children():
+            self.product_checkboxes[item] = new_state
+            values = list(self.products_tree.item(item, "values"))
+            values[0] = "☑" if new_state else "☐"
+            self.products_tree.item(item, values=values)
+        
+        # Update selection count
+        checked_count = sum(1 for checked in self.product_checkboxes.values() if checked)
+        self.selection_label.configure(text=f"Selected: {checked_count} products")
+    
     def on_product_double_click(self, event):
         """Handle double-click on product to edit"""
-        selection = self.products_tree.selection()
-        if selection:
-            item = selection[0]
-            values = self.products_tree.item(item, "values")
-            sku = values[0]
-            self.open_product_editor(sku)
+        region = self.products_tree.identify_region(event.x, event.y)
+        if region == "cell":
+            column = self.products_tree.identify_column(event.x)
+            item = self.products_tree.identify_row(event.y)
+            
+            # Don't open editor if clicked on checkbox column
+            if column != "#1" and item:
+                values = self.products_tree.item(item, "values")
+                sku = values[1]  # SKU is now in column 1 (after checkbox)
+                self.open_product_editor(sku)
             
     # ========================================================================
     # PRICES TAB
