@@ -1086,14 +1086,21 @@ class BridgeApp(ctk.CTk):
         updates = []
         for product in filtered_products:
             capital_price = product.get('capital_rtlprice')
-            if capital_price:
+            if capital_price and capital_price > 0:
+                # Ensure price is formatted correctly as string with 2 decimals
+                price_str = f"{float(capital_price):.2f}"
                 updates.append({
                     "id": product['woo_id'],
-                    "regular_price": str(capital_price)
+                    "regular_price": price_str,
+                    "sale_price": ""  # Clear sale price when syncing to Capital
                 })
+                self.log(f"Syncing {product.get('sku')}: regular_price={price_str}")
                 
         if updates:
+            self.log(f"Syncing {len(updates)} products to Capital prices")
             threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+        else:
+            messagebox.showwarning("Warning", "No valid Capital prices found to sync")
         
     def on_product_double_click(self, event):
         """Handle double-click on product to edit"""
@@ -1350,13 +1357,22 @@ class BridgeApp(ctk.CTk):
             sku = values[1]  # SKU is now in column 1 (after checkbox)
             product = data_store.get_product_by_sku(sku)
             if product:
-                updates.append({
-                    "id": product['woo_id'],
-                    "regular_price": str(product['capital_rtlprice'])
-                })
+                capital_price = product.get('capital_rtlprice')
+                if capital_price and capital_price > 0:
+                    # Ensure price is formatted correctly as string with 2 decimals
+                    price_str = f"{float(capital_price):.2f}"
+                    updates.append({
+                        "id": product['woo_id'],
+                        "regular_price": price_str,
+                        "sale_price": ""  # Clear sale price when syncing to Capital
+                    })
+                    self.log(f"Updating {sku}: regular_price={price_str}")
                 
         if updates:
+            self.log(f"Updating {len(updates)} products to Capital prices")
             threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+        else:
+            messagebox.showwarning("Warning", "No valid Capital prices found to update")
             
     def apply_discount_to_checked(self):
         """Apply discount percentage to all checked products in Prices tab"""
@@ -1420,14 +1436,21 @@ class BridgeApp(ctk.CTk):
             product = data_store.get_product_by_sku(sku)
             if product:
                 capital_price = product.get('capital_rtlprice')
-                if capital_price:
+                if capital_price and capital_price > 0:
+                    # Ensure price is formatted correctly as string with 2 decimals
+                    price_str = f"{float(capital_price):.2f}"
                     updates.append({
                         "id": product['woo_id'],
-                        "regular_price": str(capital_price)
+                        "regular_price": price_str,
+                        "sale_price": ""  # Clear sale price when syncing to Capital
                     })
+                    self.log(f"Syncing {sku}: regular_price={price_str}")
                     
         if updates:
+            self.log(f"Syncing {len(updates)} products to Capital prices")
             threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
+        else:
+            messagebox.showwarning("Warning", "No valid Capital prices found to sync")
             
     def batch_update_prices(self, updates):
         """Batch update prices in background thread"""
@@ -1447,9 +1470,10 @@ class BridgeApp(ctk.CTk):
                 for update in batch:
                     local_update = {}
                     if 'regular_price' in update:
-                        local_update['regular_price'] = update['regular_price']
+                        local_update['regular_price'] = float(update['regular_price']) if update['regular_price'] else 0
                     if 'sale_price' in update:
-                        local_update['sale_price'] = update['sale_price']
+                        # Empty string means clear the sale price
+                        local_update['sale_price'] = float(update['sale_price']) if update['sale_price'] else 0
                     data_store.update_woo_product_locally(update['id'], local_update)
                     
             data_store.set_loading(False, 100, "Update complete!")
