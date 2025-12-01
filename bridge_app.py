@@ -20,6 +20,7 @@ import customtkinter as ctk
 from tkinter import ttk, messagebox
 import requests
 from requests.auth import HTTPBasicAuth
+import urllib3
 import pyodbc
 import threading
 from datetime import datetime, timedelta
@@ -27,7 +28,6 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import sqlite3
-import os
 from collections import defaultdict
 
 # Disable SSL warnings for Capital ERP
