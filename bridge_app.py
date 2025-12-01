@@ -147,6 +147,36 @@ class DataStore:
                         self.matched_products[i]['woo_short_description'] = value
                 break
         self.notify_data_changed()
+    
+    def update_woo_product_from_api(self, product_id, product_data):
+        """Update a WooCommerce product from fresh API data"""
+        # Update in woo_products list
+        for i, product in enumerate(self.woo_products):
+            if product['id'] == product_id:
+                self.woo_products[i] = product_data
+                break
+        
+        # Update in matched_products list
+        for i, product in enumerate(self.matched_products):
+            if product.get('woo_id') == product_id:
+                # Update all WooCommerce fields from fresh data
+                self.matched_products[i]['woo_regular_price'] = float(product_data.get('regular_price', 0) or 0)
+                self.matched_products[i]['woo_sale_price'] = float(product_data.get('sale_price', 0) or 0)
+                self.matched_products[i]['woo_description'] = product_data.get('description', '')
+                self.matched_products[i]['woo_short_description'] = product_data.get('short_description', '')
+                self.matched_products[i]['name'] = product_data.get('name', '')
+                
+                # Recalculate discount
+                regular_price = self.matched_products[i]['woo_regular_price']
+                sale_price = self.matched_products[i]['woo_sale_price']
+                if regular_price and sale_price and sale_price < regular_price:
+                    discount = ((regular_price - sale_price) / regular_price) * 100
+                    self.matched_products[i]['discount'] = round(discount, 2)
+                else:
+                    self.matched_products[i]['discount'] = 0
+                break
+        
+        self.notify_data_changed()
 
 
 # Global data store instance
@@ -960,6 +990,9 @@ class BridgeApp(ctk.CTk):
         # Clear current items
         for item in self.products_tree.get_children():
             self.products_tree.delete(item)
+        
+        # Clear checkbox state to prevent accumulation
+        self.product_checkboxes.clear()
             
         # Filter and display
         for product in data_store.matched_products:
@@ -1122,14 +1155,32 @@ class BridgeApp(ctk.CTk):
             if product:
                 capital_price = product.get('capital_rtlprice')
                 if capital_price and capital_price > 0:
-                    # Ensure price is formatted correctly as string with 2 decimals
-                    price_str = f"{float(capital_price):.2f}"
-                    updates.append({
-                        "id": product['woo_id'],
-                        "regular_price": price_str,
-                        "sale_price": ""  # Clear sale price when syncing to Capital
-                    })
-                    self.log(f"Syncing {sku}: regular_price={price_str}")
+                    # Get current discount percentage
+                    current_discount = product.get('discount', 0)
+                    
+                    # Format new regular price
+                    new_regular_price = float(capital_price)
+                    price_str = f"{new_regular_price:.2f}"
+                    
+                    # Calculate new sale price to preserve discount percentage
+                    if current_discount and current_discount > 0:
+                        discount_multiplier = (100 - float(current_discount)) / 100
+                        new_sale_price = new_regular_price * discount_multiplier
+                        sale_price_str = f"{new_sale_price:.2f}"
+                        updates.append({
+                            "id": product['woo_id'],
+                            "regular_price": price_str,
+                            "sale_price": sale_price_str
+                        })
+                        self.log(f"Syncing {sku}: regular_price={price_str}, sale_price={sale_price_str} ({current_discount}% discount preserved)")
+                    else:
+                        # No discount, just update regular price and clear sale price
+                        updates.append({
+                            "id": product['woo_id'],
+                            "regular_price": price_str,
+                            "sale_price": ""
+                        })
+                        self.log(f"Syncing {sku}: regular_price={price_str} (no discount)")
                 
         if updates:
             self.log(f"Syncing {len(updates)} products to Capital prices")
@@ -1516,14 +1567,32 @@ class BridgeApp(ctk.CTk):
             if product:
                 capital_price = product.get('capital_rtlprice')
                 if capital_price and capital_price > 0:
-                    # Ensure price is formatted correctly as string with 2 decimals
-                    price_str = f"{float(capital_price):.2f}"
-                    updates.append({
-                        "id": product['woo_id'],
-                        "regular_price": price_str,
-                        "sale_price": ""  # Clear sale price when syncing to Capital
-                    })
-                    self.log(f"Syncing {sku}: regular_price={price_str}")
+                    # Get current discount percentage
+                    current_discount = product.get('discount', 0)
+                    
+                    # Format new regular price
+                    new_regular_price = float(capital_price)
+                    price_str = f"{new_regular_price:.2f}"
+                    
+                    # Calculate new sale price to preserve discount percentage
+                    if current_discount and current_discount > 0:
+                        discount_multiplier = (100 - float(current_discount)) / 100
+                        new_sale_price = new_regular_price * discount_multiplier
+                        sale_price_str = f"{new_sale_price:.2f}"
+                        updates.append({
+                            "id": product['woo_id'],
+                            "regular_price": price_str,
+                            "sale_price": sale_price_str
+                        })
+                        self.log(f"Syncing {sku}: regular_price={price_str}, sale_price={sale_price_str} ({current_discount}% discount preserved)")
+                    else:
+                        # No discount, just update regular price and clear sale price
+                        updates.append({
+                            "id": product['woo_id'],
+                            "regular_price": price_str,
+                            "sale_price": ""
+                        })
+                        self.log(f"Syncing {sku}: regular_price={price_str} (no discount)")
                     
         if updates:
             self.log(f"Syncing {len(updates)} products to Capital prices")
@@ -1531,6 +1600,32 @@ class BridgeApp(ctk.CTk):
         else:
             messagebox.showwarning("Warning", "No valid Capital prices found to sync")
             
+    def refresh_from_woocommerce(self, updates):
+        """Refresh specific products from WooCommerce after updates"""
+        try:
+            product_ids = [update['id'] for update in updates]
+            for product_id in product_ids:
+                try:
+                    # Fetch updated product from WooCommerce
+                    response = requests.get(
+                        f"{WOOCOMMERCE_CONFIG['store_url']}/wp-json/wc/v3/products/{product_id}",
+                        auth=HTTPBasicAuth(
+                            WOOCOMMERCE_CONFIG['consumer_key'],
+                            WOOCOMMERCE_CONFIG['consumer_secret']
+                        ),
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        product_data = response.json()
+                        # Update local cache with fresh data
+                        data_store.update_woo_product_from_api(product_id, product_data)
+                        self.log(f"Refreshed product {product_data.get('sku', product_id)} from WooCommerce")
+                except Exception as e:
+                    self.log(f"Warning: Could not refresh product {product_id}: {str(e)}")
+                    
+        except Exception as e:
+            self.log(f"Error refreshing products from WooCommerce: {str(e)}")
+    
     def batch_update_prices(self, updates):
         """Batch update prices in background thread"""
         try:
@@ -1556,6 +1651,10 @@ class BridgeApp(ctk.CTk):
                     data_store.update_woo_product_locally(update['id'], local_update)
                     
             data_store.set_loading(False, 100, "Update complete!")
+            
+            # Refresh products from WooCommerce to get actual updated values
+            self.log("Refreshing products from WooCommerce...")
+            self.refresh_from_woocommerce(updates)
             
             # Refresh both Products and Prices tables
             self.after(0, self.refresh_products_table)
