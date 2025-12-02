@@ -322,26 +322,52 @@ class WooCommerceClient:
         return response.json()
         
     def batch_update_products(self, updates):
-        """Batch update multiple products"""
-        url = f"{self.store_url}/wp-json/wc/v3/products/batch"
-        data = {"update": updates}
-        print(f"[DEBUG] Sending batch update to WooCommerce: {len(updates)} products")
-        print(f"[DEBUG] First update: {updates[0] if updates else 'None'}")
-        response = requests.post(url, auth=self.auth, json=data, timeout=120)
-        response.raise_for_status()
-        result = response.json()
-        print(f"[DEBUG] WooCommerce response: {result}")
+        """Batch update multiple products (handles both regular products and variations)"""
+        print(f"[DEBUG] Updating {len(updates)} products...")
         
-        # Check for errors in the response
-        if 'update' in result:
-            updated_count = len(result['update'])
-            print(f"[DEBUG] Successfully updated {updated_count} products")
-            # Check if any products had errors
-            for product in result['update']:
-                if 'error' in product:
-                    print(f"[ERROR] Product {product.get('id')} update failed: {product['error']}")
+        results = {'update': [], 'errors': []}
         
-        return result
+        for update in updates:
+            try:
+                product_id = update.get('id')
+                parent_id = update.get('parent_id')
+                
+                # Remove parent_id from update data as it's not a valid field
+                update_data = {k: v for k, v in update.items() if k not in ['id', 'parent_id']}
+                
+                # Determine the correct endpoint
+                if parent_id:
+                    # This is a variation - use variations endpoint
+                    url = f"{self.store_url}/wp-json/wc/v3/products/{parent_id}/variations/{product_id}"
+                    print(f"[DEBUG] Updating variation {product_id} of parent {parent_id}")
+                else:
+                    # This is a regular product
+                    url = f"{self.store_url}/wp-json/wc/v3/products/{product_id}"
+                    print(f"[DEBUG] Updating product {product_id}")
+                
+                print(f"[DEBUG] Update data: {update_data}")
+                
+                response = requests.put(url, auth=self.auth, json=update_data, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                
+                results['update'].append(result)
+                print(f"[SUCCESS] Updated product/variation {product_id}")
+                
+            except requests.exceptions.HTTPError as e:
+                error_msg = f"Product {product_id} failed: {e.response.text if hasattr(e, 'response') else str(e)}"
+                print(f"[ERROR] {error_msg}")
+                results['errors'].append({'id': product_id, 'error': error_msg})
+            except Exception as e:
+                error_msg = f"Product {product_id} failed: {str(e)}"
+                print(f"[ERROR] {error_msg}")
+                results['errors'].append({'id': product_id, 'error': error_msg})
+        
+        success_count = len(results['update'])
+        error_count = len(results['errors'])
+        print(f"[DEBUG] Update complete: {success_count} succeeded, {error_count} failed")
+        
+        return results
 
 
 class CapitalClient:
@@ -451,6 +477,7 @@ class ProductMatcher:
                 matched_product = {
                     'sku': sku,
                     'woo_id': woo_product['id'],
+                    'parent_id': woo_product.get('parent_id'),  # For variations
                     'woo_name': woo_product.get('name', ''),
                     'woo_regular_price': regular_price,
                     'woo_sale_price': sale_price,
@@ -1091,6 +1118,7 @@ class BridgeApp(ctk.CTk):
             if product:
                 updates.append({
                     "id": product['woo_id'],
+                    "parent_id": product.get('parent_id'),
                     "regular_price": f"{price:.2f}"
                 })
                 self.log(f"Updating {sku}: regular_price={price:.2f}")
@@ -1138,6 +1166,7 @@ class BridgeApp(ctk.CTk):
                     sale_price = regular_price * (1 - discount_percent / 100)
                     updates.append({
                         "id": product['woo_id'],
+                        "parent_id": product.get('parent_id'),
                         "sale_price": f"{sale_price:.2f}"
                     })
                     self.log(f"Applying {discount_percent}% discount to {sku}: sale_price={sale_price:.2f}")
@@ -1183,6 +1212,7 @@ class BridgeApp(ctk.CTk):
                         sale_price_str = f"{new_sale_price:.2f}"
                         updates.append({
                             "id": product['woo_id'],
+                            "parent_id": product.get('parent_id'),
                             "regular_price": price_str,
                             "sale_price": sale_price_str
                         })
@@ -1191,6 +1221,7 @@ class BridgeApp(ctk.CTk):
                         # No discount, just update regular price and clear sale price
                         updates.append({
                             "id": product['woo_id'],
+                            "parent_id": product.get('parent_id'),
                             "regular_price": price_str,
                             "sale_price": ""
                         })
@@ -1507,6 +1538,7 @@ class BridgeApp(ctk.CTk):
                     price_str = f"{float(capital_price):.2f}"
                     updates.append({
                         "id": product['woo_id'],
+                        "parent_id": product.get('parent_id'),
                         "regular_price": price_str,
                         "sale_price": ""  # Clear sale price when syncing to Capital
                     })
@@ -1554,6 +1586,7 @@ class BridgeApp(ctk.CTk):
                     sale_price = regular_price * (1 - discount_percent / 100)
                     updates.append({
                         "id": product['woo_id'],
+                        "parent_id": product.get('parent_id'),
                         "sale_price": f"{sale_price:.2f}"
                     })
                     
@@ -1595,6 +1628,7 @@ class BridgeApp(ctk.CTk):
                         sale_price_str = f"{new_sale_price:.2f}"
                         updates.append({
                             "id": product['woo_id'],
+                            "parent_id": product.get('parent_id'),
                             "regular_price": price_str,
                             "sale_price": sale_price_str
                         })
@@ -1603,6 +1637,7 @@ class BridgeApp(ctk.CTk):
                         # No discount, just update regular price and clear sale price
                         updates.append({
                             "id": product['woo_id'],
+                            "parent_id": product.get('parent_id'),
                             "regular_price": price_str,
                             "sale_price": ""
                         })
