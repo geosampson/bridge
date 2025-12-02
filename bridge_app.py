@@ -958,6 +958,26 @@ class BridgeApp(ctk.CTk):
             fg_color="blue"
         ).grid(row=3, column=0, columnspan=3, padx=5, pady=5)
         
+        # Refresh buttons frame
+        refresh_frame = ctk.CTkFrame(group_update_frame)
+        refresh_frame.grid(row=4, column=0, columnspan=3, padx=5, pady=5)
+        
+        ctk.CTkButton(
+            refresh_frame,
+            text="🔄 Refresh Capital Prices",
+            command=self.refresh_capital_prices_for_checked,
+            width=180,
+            fg_color="green"
+        ).pack(side="left", padx=2)
+        
+        ctk.CTkButton(
+            refresh_frame,
+            text="🔄 Refresh WooCommerce Prices",
+            command=self.refresh_woo_prices_for_checked,
+            width=180,
+            fg_color="orange"
+        ).pack(side="left", padx=2)
+        
         # Products treeview
         tree_frame = ctk.CTkFrame(self.tab_products)
         tree_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
@@ -1420,6 +1440,20 @@ class BridgeApp(ctk.CTk):
             command=self.update_selected_to_capital_price,
             fg_color="green"
         ).grid(row=0, column=1, padx=10, pady=5)
+        
+        ctk.CTkButton(
+            actions_frame,
+            text="🔄 Refresh Capital Prices",
+            command=self.refresh_capital_prices_for_checked_prices_tab,
+            fg_color="green"
+        ).grid(row=0, column=2, padx=10, pady=5)
+        
+        ctk.CTkButton(
+            actions_frame,
+            text="🔄 Refresh WooCommerce Prices",
+            command=self.refresh_woo_prices_for_checked_prices_tab,
+            fg_color="orange"
+        ).grid(row=0, column=3, padx=10, pady=5)
         
     def refresh_prices_table(self):
         """Refresh the prices table"""
@@ -2210,6 +2244,218 @@ class BridgeApp(ctk.CTk):
         finally:
             self.after(0, lambda: self.fetch_btn.configure(state="normal", text="📥 Fetch All Data"))
             
+    # ========================================================================
+    # SELECTIVE REFRESH METHODS
+    # ========================================================================
+    
+    def refresh_capital_prices_for_checked(self):
+        """Refresh Capital prices for checked products in Products tab"""
+        checked_items = [item_id for item_id, checked in self.product_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to refresh")
+            return
+        
+        # Get SKUs of checked products
+        skus = []
+        for item in checked_items:
+            values = self.products_tree.item(item, "values")
+            sku = values[1]  # SKU is in column 1
+            skus.append(sku)
+        
+        self.log(f"Refreshing Capital prices for {len(skus)} products...")
+        threading.Thread(target=self.refresh_capital_prices_background, args=(skus,), daemon=True).start()
+    
+    def refresh_woo_prices_for_checked(self):
+        """Refresh WooCommerce prices for checked products in Products tab"""
+        checked_items = [item_id for item_id, checked in self.product_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to refresh")
+            return
+        
+        # Get product IDs and parent IDs of checked products
+        products_to_refresh = []
+        for item in checked_items:
+            values = self.products_tree.item(item, "values")
+            sku = values[1]  # SKU is in column 1
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                products_to_refresh.append({
+                    'id': product['woo_id'],
+                    'parent_id': product.get('parent_id'),
+                    'sku': sku
+                })
+        
+        self.log(f"Refreshing WooCommerce prices for {len(products_to_refresh)} products...")
+        threading.Thread(target=self.refresh_woo_prices_background, args=(products_to_refresh,), daemon=True).start()
+    
+    def refresh_capital_prices_for_checked_prices_tab(self):
+        """Refresh Capital prices for checked products in Prices tab"""
+        checked_items = [item_id for item_id, checked in self.price_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to refresh")
+            return
+        
+        # Get SKUs of checked products
+        skus = []
+        for item in checked_items:
+            values = self.prices_tree.item(item, "values")
+            sku = values[1]  # SKU is in column 1
+            skus.append(sku)
+        
+        self.log(f"Refreshing Capital prices for {len(skus)} products...")
+        threading.Thread(target=self.refresh_capital_prices_background, args=(skus,), daemon=True).start()
+    
+    def refresh_woo_prices_for_checked_prices_tab(self):
+        """Refresh WooCommerce prices for checked products in Prices tab"""
+        checked_items = [item_id for item_id, checked in self.price_checkboxes.items() if checked]
+        
+        if not checked_items:
+            messagebox.showwarning("Warning", "Please check products to refresh")
+            return
+        
+        # Get product IDs and parent IDs of checked products
+        products_to_refresh = []
+        for item in checked_items:
+            values = self.prices_tree.item(item, "values")
+            sku = values[1]  # SKU is in column 1
+            product = data_store.get_product_by_sku(sku)
+            if product:
+                products_to_refresh.append({
+                    'id': product['woo_id'],
+                    'parent_id': product.get('parent_id'),
+                    'sku': sku
+                })
+        
+        self.log(f"Refreshing WooCommerce prices for {len(products_to_refresh)} products...")
+        threading.Thread(target=self.refresh_woo_prices_background, args=(products_to_refresh,), daemon=True).start()
+    
+    def refresh_capital_prices_background(self, skus):
+        """Background thread to refresh Capital prices for specific SKUs"""
+        try:
+            data_store.set_loading(True, 0, "Refreshing Capital prices...")
+            
+            # Build filter for Capital API to get only these SKUs
+            # Capital API filter format: "CODE IN ('SKU1','SKU2','SKU3')"
+            sku_list = "','".join(skus)
+            filters = f"CODE IN ('{sku_list}')"
+            
+            # Fetch from Capital
+            capital_products = self.capital_client.get_products(filters=filters)
+            self.log(f"Fetched {len(capital_products)} products from Capital")
+            
+            # Update matched products with new Capital prices
+            updated_count = 0
+            for cap_product in capital_products:
+                code = str(cap_product.get('CODE', '')).strip().upper()
+                for i, matched_product in enumerate(data_store.matched_products):
+                    if matched_product.get('sku', '').strip().upper() == code:
+                        # Update Capital fields
+                        data_store.matched_products[i]['capital_rtlprice'] = float(cap_product.get('RTLPRICE') or 0)
+                        data_store.matched_products[i]['capital_whsprice'] = float(cap_product.get('WHSPRICE') or 0)
+                        data_store.matched_products[i]['capital_discount'] = float(cap_product.get('DISCOUNT') or 0)
+                        data_store.matched_products[i]['capital_maxdiscount'] = float(cap_product.get('MAXDISCOUNT') or 0)
+                        
+                        # Recalculate price match
+                        woo_price = matched_product.get('woo_regular_price', 0)
+                        cap_price = float(cap_product.get('RTLPRICE') or 0)
+                        data_store.matched_products[i]['price_match'] = abs(woo_price - cap_price) < 0.01
+                        
+                        updated_count += 1
+                        self.log(f"Updated Capital price for {code}: €{cap_price:.2f}")
+                        break
+            
+            data_store.set_loading(False, 100, "Capital prices refreshed!")
+            self.log(f"Successfully refreshed {updated_count} Capital prices")
+            
+            # Notify data changed to refresh UI
+            data_store.notify_data_changed()
+            
+            self.after(0, lambda: messagebox.showinfo("Success", f"Refreshed {updated_count} Capital prices"))
+            
+        except Exception as e:
+            data_store.set_loading(False, 0, "Refresh failed")
+            self.log(f"Error refreshing Capital prices: {str(e)}")
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to refresh Capital prices: {str(e)}"))
+    
+    def refresh_woo_prices_background(self, products_to_refresh):
+        """Background thread to refresh WooCommerce prices for specific products"""
+        try:
+            data_store.set_loading(True, 0, "Refreshing WooCommerce prices...")
+            
+            updated_count = 0
+            for i, product_info in enumerate(products_to_refresh):
+                try:
+                    product_id = product_info['id']
+                    parent_id = product_info.get('parent_id')
+                    sku = product_info['sku']
+                    
+                    # Determine correct endpoint
+                    if parent_id:
+                        url = f"{WOOCOMMERCE_CONFIG['store_url']}/wp-json/wc/v3/products/{parent_id}/variations/{product_id}"
+                    else:
+                        url = f"{WOOCOMMERCE_CONFIG['store_url']}/wp-json/wc/v3/products/{product_id}"
+                    
+                    # Fetch from WooCommerce
+                    response = requests.get(
+                        url,
+                        auth=HTTPBasicAuth(
+                            WOOCOMMERCE_CONFIG['consumer_key'],
+                            WOOCOMMERCE_CONFIG['consumer_secret']
+                        ),
+                        timeout=10
+                    )
+                    
+                    if response.status_code == 200:
+                        product_data = response.json()
+                        
+                        # Update matched product
+                        for j, matched_product in enumerate(data_store.matched_products):
+                            if matched_product.get('woo_id') == product_id:
+                                # Update WooCommerce fields
+                                regular_price = float(product_data.get('regular_price', 0) or 0)
+                                sale_price = float(product_data.get('sale_price', 0) or 0)
+                                
+                                data_store.matched_products[j]['woo_regular_price'] = regular_price
+                                data_store.matched_products[j]['woo_sale_price'] = sale_price
+                                
+                                # Recalculate discount
+                                if regular_price > 0 and sale_price > 0:
+                                    discount_percent = round((1 - sale_price / regular_price) * 100, 2)
+                                    data_store.matched_products[j]['woo_discount_percent'] = discount_percent
+                                else:
+                                    data_store.matched_products[j]['woo_discount_percent'] = 0
+                                
+                                # Recalculate price match
+                                cap_price = matched_product.get('capital_rtlprice', 0)
+                                data_store.matched_products[j]['price_match'] = abs(regular_price - cap_price) < 0.01
+                                
+                                updated_count += 1
+                                self.log(f"Updated WooCommerce price for {sku}: €{regular_price:.2f}")
+                                break
+                    
+                    # Update progress
+                    progress = int((i + 1) / len(products_to_refresh) * 100)
+                    data_store.set_loading(True, progress, f"Refreshed {i + 1}/{len(products_to_refresh)} products")
+                    
+                except Exception as e:
+                    self.log(f"Error refreshing {sku}: {str(e)}")
+            
+            data_store.set_loading(False, 100, "WooCommerce prices refreshed!")
+            self.log(f"Successfully refreshed {updated_count} WooCommerce prices")
+            
+            # Notify data changed to refresh UI
+            data_store.notify_data_changed()
+            
+            self.after(0, lambda: messagebox.showinfo("Success", f"Refreshed {updated_count} WooCommerce prices"))
+            
+        except Exception as e:
+            data_store.set_loading(False, 0, "Refresh failed")
+            self.log(f"Error refreshing WooCommerce prices: {str(e)}")
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to refresh WooCommerce prices: {str(e)}"))
+    
     # ========================================================================
     # EVENT HANDLERS
     # ========================================================================
