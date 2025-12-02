@@ -325,9 +325,23 @@ class WooCommerceClient:
         """Batch update multiple products"""
         url = f"{self.store_url}/wp-json/wc/v3/products/batch"
         data = {"update": updates}
+        print(f"[DEBUG] Sending batch update to WooCommerce: {len(updates)} products")
+        print(f"[DEBUG] First update: {updates[0] if updates else 'None'}")
         response = requests.post(url, auth=self.auth, json=data, timeout=120)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        print(f"[DEBUG] WooCommerce response: {result}")
+        
+        # Check for errors in the response
+        if 'update' in result:
+            updated_count = len(result['update'])
+            print(f"[DEBUG] Successfully updated {updated_count} products")
+            # Check if any products had errors
+            for product in result['update']:
+                if 'error' in product:
+                    print(f"[ERROR] Product {product.get('id')} update failed: {product['error']}")
+        
+        return result
 
 
 class CapitalClient:
@@ -1635,7 +1649,19 @@ class BridgeApp(ctk.CTk):
             batch_size = 50
             for i in range(0, len(updates), batch_size):
                 batch = updates[i:i+batch_size]
-                self.woo_client.batch_update_products(batch)
+                self.log(f"Sending batch {i//batch_size + 1}: {len(batch)} products")
+                if batch:
+                    self.log(f"Sample update: ID={batch[0]['id']}, regular_price={batch[0].get('regular_price')}, sale_price={batch[0].get('sale_price')}")
+                
+                result = self.woo_client.batch_update_products(batch)
+                
+                # Log any errors from WooCommerce
+                if 'update' in result:
+                    for product in result['update']:
+                        if 'error' in product:
+                            self.log(f"ERROR: Product {product.get('id')} failed: {product['error'].get('message', 'Unknown error')}")
+                        else:
+                            self.log(f"Updated product {product.get('id')}: {product.get('sku', 'N/A')}")
                 
                 progress = min(100, int((i + len(batch)) / len(updates) * 100))
                 data_store.set_loading(True, progress, f"Updated {i + len(batch)}/{len(updates)} products")
