@@ -166,14 +166,14 @@ class DataStore:
                 self.matched_products[i]['woo_short_description'] = product_data.get('short_description', '')
                 self.matched_products[i]['name'] = product_data.get('name', '')
                 
-                # Recalculate discount
+                # Recalculate discount percentage
                 regular_price = self.matched_products[i]['woo_regular_price']
                 sale_price = self.matched_products[i]['woo_sale_price']
-                if regular_price and sale_price and sale_price < regular_price:
-                    discount = ((regular_price - sale_price) / regular_price) * 100
-                    self.matched_products[i]['discount'] = round(discount, 2)
+                if regular_price > 0 and sale_price > 0:
+                    discount_percent = round((1 - sale_price / regular_price) * 100, 2)
+                    self.matched_products[i]['woo_discount_percent'] = discount_percent
                 else:
-                    self.matched_products[i]['discount'] = 0
+                    self.matched_products[i]['woo_discount_percent'] = 0
                 break
         
         self.notify_data_changed()
@@ -1652,12 +1652,21 @@ class BridgeApp(ctk.CTk):
     def refresh_from_woocommerce(self, updates):
         """Refresh specific products from WooCommerce after updates"""
         try:
-            product_ids = [update['id'] for update in updates]
-            for product_id in product_ids:
+            for update in updates:
+                product_id = update['id']
+                parent_id = update.get('parent_id')
                 try:
+                    # Determine correct endpoint based on whether it's a variation
+                    if parent_id:
+                        # This is a variation
+                        url = f"{WOOCOMMERCE_CONFIG['store_url']}/wp-json/wc/v3/products/{parent_id}/variations/{product_id}"
+                    else:
+                        # This is a regular product
+                        url = f"{WOOCOMMERCE_CONFIG['store_url']}/wp-json/wc/v3/products/{product_id}"
+                    
                     # Fetch updated product from WooCommerce
                     response = requests.get(
-                        f"{WOOCOMMERCE_CONFIG['store_url']}/wp-json/wc/v3/products/{product_id}",
+                        url,
                         auth=HTTPBasicAuth(
                             WOOCOMMERCE_CONFIG['consumer_key'],
                             WOOCOMMERCE_CONFIG['consumer_secret']
