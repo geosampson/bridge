@@ -1034,7 +1034,7 @@ class BridgeApp(ctk.CTk):
                 f"{product.get('woo_regular_price', 0):.2f}",
                 f"{product.get('capital_rtlprice', 0):.2f}",
                 f"{product.get('woo_sale_price', 0):.2f}" if product.get('woo_sale_price') else "-",
-                f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') else "-",
+                f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') is not None else "-",
                 product.get('woo_stock_quantity', '-'),
                 product.get('woo_total_sales', 0),
                 match_status
@@ -1170,14 +1170,14 @@ class BridgeApp(ctk.CTk):
                 capital_price = product.get('capital_rtlprice')
                 if capital_price and capital_price > 0:
                     # Get current discount percentage
-                    current_discount = product.get('discount', 0)
+                    current_discount = product.get('woo_discount_percent', 0)
                     
                     # Format new regular price
                     new_regular_price = float(capital_price)
                     price_str = f"{new_regular_price:.2f}"
                     
                     # Calculate new sale price to preserve discount percentage
-                    if current_discount and current_discount > 0:
+                    if current_discount is not None and float(current_discount) > 0:
                         discount_multiplier = (100 - float(current_discount)) / 100
                         new_sale_price = new_regular_price * discount_multiplier
                         sale_price_str = f"{new_sale_price:.2f}"
@@ -1423,7 +1423,7 @@ class BridgeApp(ctk.CTk):
                 f"{capital_price:.2f}",
                 f"{difference:+.2f}",
                 f"{product.get('woo_sale_price', 0):.2f}" if product.get('woo_sale_price') else "-",
-                f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') else "-"
+                f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') is not None else "-"
             ))
             self.price_checkboxes[item_id] = False  # Track unchecked state
             count += 1
@@ -1582,14 +1582,14 @@ class BridgeApp(ctk.CTk):
                 capital_price = product.get('capital_rtlprice')
                 if capital_price and capital_price > 0:
                     # Get current discount percentage
-                    current_discount = product.get('discount', 0)
+                    current_discount = product.get('woo_discount_percent', 0)
                     
                     # Format new regular price
                     new_regular_price = float(capital_price)
                     price_str = f"{new_regular_price:.2f}"
                     
                     # Calculate new sale price to preserve discount percentage
-                    if current_discount and current_discount > 0:
+                    if current_discount is not None and float(current_discount) > 0:
                         discount_multiplier = (100 - float(current_discount)) / 100
                         new_sale_price = new_regular_price * discount_multiplier
                         sale_price_str = f"{new_sale_price:.2f}"
