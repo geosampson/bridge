@@ -455,17 +455,31 @@ class ProductMatcher:
         unmatched_capital = list(capital_products)  # Copy to track unmatched
         
         # Create lookup dictionary for Capital products
+        # Store both original and normalized (without leading zeros) versions
         capital_lookup = {}
+        capital_lookup_normalized = {}
         for cap_product in capital_products:
             code = str(cap_product.get('CODE', '')).strip().upper()
             if code:
                 capital_lookup[code] = cap_product
+                # Also store normalized version (remove leading zeros)
+                code_normalized = code.lstrip('0') or '0'  # Keep at least one zero if all zeros
+                capital_lookup_normalized[code_normalized] = cap_product
                 
         for woo_product in woo_products:
             sku = str(woo_product.get('sku', '')).strip().upper()
             
+            # Try exact match first
+            cap_product = None
             if sku and sku in capital_lookup:
                 cap_product = capital_lookup[sku]
+            # If no exact match, try normalized match (ignore leading zeros)
+            elif sku:
+                sku_normalized = sku.lstrip('0') or '0'
+                if sku_normalized in capital_lookup_normalized:
+                    cap_product = capital_lookup_normalized[sku_normalized]
+            
+            if cap_product:
                 
                 # Calculate discount percentage
                 regular_price = float(woo_product.get('regular_price') or 0)
@@ -1909,12 +1923,12 @@ class BridgeApp(ctk.CTk):
         # Filter Capital unmatched
         for product in data_store.unmatched_capital:
             code = product.get('CODE', '').lower()
-            name = product.get('NAME', '').lower()
+            descr = product.get('DESCR', '').lower()
             
-            if not capital_search or capital_search in code or capital_search in name:
+            if not capital_search or capital_search in code or capital_search in descr:
                 self.unmatched_capital_tree.insert("", "end", values=(
                     product.get('CODE', ''),
-                    product.get('NAME', '')[:50]
+                    product.get('DESCR', '')[:50]
                 ))
                 
     def clear_unmatched_filters(self):
@@ -1968,7 +1982,91 @@ class BridgeApp(ctk.CTk):
         woo_item = self.unmatched_woo_tree.item(woo_selection[0], "values")
         capital_item = self.unmatched_capital_tree.item(capital_selection[0], "values")
         
-        messagebox.showinfo("Info", f"Matching:\nWooCommerce: {woo_item[0]} - {woo_item[1]}\nCapital: {capital_item[0]} - {capital_item[1]}\n\nManual matching feature - to be implemented based on your workflow")
+        woo_sku = woo_item[0]
+        capital_code = capital_item[0]
+        
+        # Confirm match
+        if not messagebox.askyesno(
+            "Confirm Manual Match",
+            f"Match these products?\n\n"
+            f"WooCommerce:\n  SKU: {woo_sku}\n  Name: {woo_item[1]}\n\n"
+            f"Capital:\n  CODE: {capital_code}\n  Description: {capital_item[1]}\n\n"
+            f"This will create a matched product entry."
+        ):
+            return
+        
+        try:
+            # Find full product data
+            woo_product = None
+            for product in data_store.unmatched_woo:
+                if product.get('sku', '') == woo_sku:
+                    woo_product = product
+                    break
+            
+            capital_product = None
+            for product in data_store.unmatched_capital:
+                if product.get('CODE', '') == capital_code:
+                    capital_product = product
+                    break
+            
+            if not woo_product or not capital_product:
+                messagebox.showerror("Error", "Could not find full product data")
+                return
+            
+            # Create matched product entry
+            regular_price = float(woo_product.get('regular_price') or 0)
+            sale_price = float(woo_product.get('sale_price') or 0)
+            discount_percent = 0
+            if regular_price > 0 and sale_price > 0:
+                discount_percent = round((1 - sale_price / regular_price) * 100, 2)
+            
+            matched_product = {
+                'sku': woo_sku,
+                'woo_id': woo_product['id'],
+                'parent_id': woo_product.get('parent_id'),
+                'woo_name': woo_product.get('name', ''),
+                'woo_regular_price': regular_price,
+                'woo_sale_price': sale_price,
+                'woo_discount_percent': discount_percent,
+                'woo_stock_quantity': woo_product.get('stock_quantity'),
+                'woo_stock_status': woo_product.get('stock_status'),
+                'woo_total_sales': woo_product.get('total_sales', 0),
+                'woo_description': woo_product.get('description', ''),
+                'woo_short_description': woo_product.get('short_description', ''),
+                'woo_categories': [cat.get('name', '') for cat in woo_product.get('categories', [])],
+                'woo_permalink': woo_product.get('permalink', ''),
+                'woo_date_created': woo_product.get('date_created', ''),
+                'woo_date_modified': woo_product.get('date_modified', ''),
+                
+                'capital_code': capital_product.get('CODE', ''),
+                'capital_descr': capital_product.get('DESCR', ''),
+                'capital_rtlprice': float(capital_product.get('RTLPRICE') or 0),
+                'capital_whsprice': float(capital_product.get('WHSPRICE') or 0),
+                'capital_trmode': capital_product.get('TRMODE', 0),
+                'capital_discount': float(capital_product.get('DISCOUNT') or 0),
+                'capital_maxdiscount': float(capital_product.get('MAXDISCOUNT') or 0),
+                
+                'price_match': abs(regular_price - float(capital_product.get('RTLPRICE') or 0)) < 0.01,
+                'manually_matched': True
+            }
+            
+            # Add to matched products
+            data_store.matched_products.append(matched_product)
+            
+            # Remove from unmatched lists
+            data_store.unmatched_woo = [p for p in data_store.unmatched_woo if p.get('sku', '') != woo_sku]
+            data_store.unmatched_capital = [p for p in data_store.unmatched_capital if p.get('CODE', '') != capital_code]
+            
+            # Refresh UI
+            data_store.notify_data_changed()
+            
+            self.log(f"Manually matched: WOO SKU {woo_sku} <-> Capital CODE {capital_code}")
+            messagebox.showinfo("Success", f"Successfully matched products!\n\nSKU: {woo_sku}\nCODE: {capital_code}\n\nThe matched product now appears in Products and Prices tabs.")
+            
+        except Exception as e:
+            self.log(f"Error in manual matching: {str(e)}")
+            messagebox.showerror("Error", f"Failed to match products: {str(e)}")
+
         
     # ========================================================================
     # ANALYTICS TAB
