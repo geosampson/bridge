@@ -408,7 +408,7 @@ class CapitalClient:
             
         if fields is None:
             # Default fields for product matching
-            fields = "CODE;DESCR;RTLPRICE;WHSPRICE;TRMODE;DISCOUNT;MAXDISCOUNT"
+            fields = "CODE;DESCR;RTLPRICE;WHSPRICE;TRMODE;DISCOUNT;MAXDISCOUNT;STOCK"
             
         request_data = {
             "service": "getdata",
@@ -467,14 +467,28 @@ class ProductMatcher:
                 capital_lookup_normalized[code_normalized] = cap_product
                 
         for woo_product in woo_products:
+            # Skip parent products (variable products without SKU or with type='variable')
+            # Only match variations and regular products
+            product_type = woo_product.get('type', '')
+            is_variation = woo_product.get('is_variation', False)
+            
+            # Skip if it's a parent variable product (not a variation)
+            if product_type == 'variable' and not is_variation:
+                continue
+            
             sku = str(woo_product.get('sku', '')).strip().upper()
+            
+            # Skip products without SKU
+            if not sku:
+                unmatched_woo.append(woo_product)
+                continue
             
             # Try exact match first
             cap_product = None
-            if sku and sku in capital_lookup:
+            if sku in capital_lookup:
                 cap_product = capital_lookup[sku]
             # If no exact match, try normalized match (ignore leading zeros)
-            elif sku:
+            else:
                 sku_normalized = sku.lstrip('0') or '0'
                 if sku_normalized in capital_lookup_normalized:
                     cap_product = capital_lookup_normalized[sku_normalized]
@@ -513,6 +527,7 @@ class ProductMatcher:
                     'capital_trmode': cap_product.get('TRMODE', 0),
                     'capital_discount': float(cap_product.get('DISCOUNT') or 0),
                     'capital_maxdiscount': float(cap_product.get('MAXDISCOUNT') or 0),
+                    'capital_stock': float(cap_product.get('STOCK') or 0),
                     
                     'price_match': abs(regular_price - float(cap_product.get('RTLPRICE') or 0)) < 0.01,
                 }
@@ -1001,7 +1016,7 @@ class BridgeApp(ctk.CTk):
         # Create treeview with scrollbars
         columns = (
             "☑", "SKU", "Name", "WOO Price", "Capital Price", 
-            "Sale Price", "Discount %", "Stock", "Total Sales", "Match"
+            "Sale Price", "Discount %", "WOO Stock", "Capital Stock", "Total Sales", "Match"
         )
         
         self.products_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
@@ -1017,7 +1032,8 @@ class BridgeApp(ctk.CTk):
         self.products_tree.heading("Capital Price", text="Capital Price €")
         self.products_tree.heading("Sale Price", text="Sale Price €")
         self.products_tree.heading("Discount %", text="Discount %")
-        self.products_tree.heading("Stock", text="Stock")
+        self.products_tree.heading("WOO Stock", text="WOO Stock")
+        self.products_tree.heading("Capital Stock", text="Capital Stock")
         self.products_tree.heading("Total Sales", text="Sales")
         self.products_tree.heading("Match", text="Match")
         
@@ -1028,7 +1044,8 @@ class BridgeApp(ctk.CTk):
         self.products_tree.column("Capital Price", width=100)
         self.products_tree.column("Sale Price", width=100)
         self.products_tree.column("Discount %", width=80)
-        self.products_tree.column("Stock", width=60)
+        self.products_tree.column("WOO Stock", width=80)
+        self.products_tree.column("Capital Stock", width=90)
         self.products_tree.column("Total Sales", width=60)
         self.products_tree.column("Match", width=60)
         
@@ -1097,6 +1114,7 @@ class BridgeApp(ctk.CTk):
                 f"{product.get('woo_sale_price', 0):.2f}" if product.get('woo_sale_price') else "-",
                 f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') is not None else "-",
                 product.get('woo_stock_quantity', '-'),
+                f"{product.get('capital_stock', 0):.0f}" if product.get('capital_stock') is not None else "-",
                 product.get('woo_total_sales', 0),
                 match_status
             ))
@@ -2045,6 +2063,7 @@ class BridgeApp(ctk.CTk):
                 'capital_trmode': capital_product.get('TRMODE', 0),
                 'capital_discount': float(capital_product.get('DISCOUNT') or 0),
                 'capital_maxdiscount': float(capital_product.get('MAXDISCOUNT') or 0),
+                'capital_stock': float(capital_product.get('STOCK') or 0),
                 
                 'price_match': abs(regular_price - float(capital_product.get('RTLPRICE') or 0)) < 0.01,
                 'manually_matched': True
@@ -2455,6 +2474,7 @@ class BridgeApp(ctk.CTk):
                         data_store.matched_products[i]['capital_whsprice'] = float(cap_product.get('WHSPRICE') or 0)
                         data_store.matched_products[i]['capital_discount'] = float(cap_product.get('DISCOUNT') or 0)
                         data_store.matched_products[i]['capital_maxdiscount'] = float(cap_product.get('MAXDISCOUNT') or 0)
+                        data_store.matched_products[i]['capital_stock'] = float(cap_product.get('STOCK') or 0)
                         
                         # Recalculate price match
                         woo_price = matched_product.get('woo_regular_price', 0)
