@@ -408,7 +408,7 @@ class CapitalClient:
             
         if fields is None:
             # Default fields for product matching
-            fields = "CODE;DESCR;RTLPRICE;WHSPRICE;TRMODE;DISCOUNT;MAXDISCOUNT;STOCK"
+            fields = "CODE;DESCR;RTLPRICE;WHSPRICE;TRMODE;DISCOUNT;MAXDISCOUNT;BALANCEQTY"
             
         request_data = {
             "service": "getdata",
@@ -527,7 +527,7 @@ class ProductMatcher:
                     'capital_trmode': cap_product.get('TRMODE', 0),
                     'capital_discount': float(cap_product.get('DISCOUNT') or 0),
                     'capital_maxdiscount': float(cap_product.get('MAXDISCOUNT') or 0),
-                    'capital_stock': float(cap_product.get('STOCK') or 0),
+                    'capital_stock': float(cap_product.get('BALANCEQTY') or 0),
                     
                     'price_match': abs(regular_price - float(cap_product.get('RTLPRICE') or 0)) < 0.01,
                 }
@@ -2063,7 +2063,7 @@ class BridgeApp(ctk.CTk):
                 'capital_trmode': capital_product.get('TRMODE', 0),
                 'capital_discount': float(capital_product.get('DISCOUNT') or 0),
                 'capital_maxdiscount': float(capital_product.get('MAXDISCOUNT') or 0),
-                'capital_stock': float(capital_product.get('STOCK') or 0),
+                'capital_stock': float(capital_product.get('BALANCEQTY') or 0),
                 
                 'price_match': abs(regular_price - float(capital_product.get('RTLPRICE') or 0)) < 0.01,
                 'manually_matched': True
@@ -2474,7 +2474,7 @@ class BridgeApp(ctk.CTk):
                         data_store.matched_products[i]['capital_whsprice'] = float(cap_product.get('WHSPRICE') or 0)
                         data_store.matched_products[i]['capital_discount'] = float(cap_product.get('DISCOUNT') or 0)
                         data_store.matched_products[i]['capital_maxdiscount'] = float(cap_product.get('MAXDISCOUNT') or 0)
-                        data_store.matched_products[i]['capital_stock'] = float(cap_product.get('STOCK') or 0)
+                        data_store.matched_products[i]['capital_stock'] = float(cap_product.get('BALANCEQTY') or 0)
                         
                         # Recalculate price match
                         woo_price = matched_product.get('woo_regular_price', 0)
