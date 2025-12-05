@@ -752,6 +752,7 @@ class BridgeApp(ctk.CTk):
         self.tab_unmatched = self.tabview.add("🔗 Unmatched")
         self.tab_analytics = self.tabview.add("📈 Analytics")
         self.tab_logs = self.tabview.add("📋 Logs")
+        self.tab_ai = self.tabview.add("🤖 AI Assistant")
         
         # Initialize tab content
         self.setup_overview_tab()
@@ -760,6 +761,7 @@ class BridgeApp(ctk.CTk):
         self.setup_unmatched_tab()
         self.setup_analytics_tab()
         self.setup_logs_tab()
+        self.setup_ai_tab()
         
     def create_status_bar(self):
         """Create status bar at bottom"""
@@ -2220,6 +2222,99 @@ class BridgeApp(ctk.CTk):
             text="🗑️ Clear Logs",
             command=lambda: self.logs_text.delete("1.0", "end")
         ).grid(row=1, column=0, pady=10)
+        
+    def setup_ai_tab(self):
+        """Setup AI Assistant tab"""
+        try:
+            from ai_chat_assistant import AIChatAssistant
+            
+            self.tab_ai.grid_columnconfigure(0, weight=1)
+            self.tab_ai.grid_rowconfigure(0, weight=1)
+            
+            # Create AI chat assistant with context function
+            self.ai_chat = AIChatAssistant(
+                self.tab_ai,
+                get_context=self.get_ai_context
+            )
+            self.ai_chat.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+            
+        except ImportError as e:
+            # AI modules not available
+            error_frame = ctk.CTkFrame(self.tab_ai)
+            error_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+            
+            ctk.CTkLabel(
+                error_frame,
+                text="🤖 AI Assistant Not Available",
+                font=("Arial", 18, "bold")
+            ).pack(pady=20)
+            
+            ctk.CTkLabel(
+                error_frame,
+                text="AI features require additional setup:",
+                font=("Arial", 14)
+            ).pack(pady=10)
+            
+            instructions = [
+                "1. Install required package: sudo pip3 install anthropic",
+                "2. Get API key from: https://console.anthropic.com/",
+                "3. Set environment variable: export ANTHROPIC_API_KEY='your-key'",
+                "4. Restart BRIDGE"
+            ]
+            
+            for instruction in instructions:
+                ctk.CTkLabel(
+                    error_frame,
+                    text=instruction,
+                    font=("Arial", 12),
+                    anchor="w"
+                ).pack(fill="x", padx=40, pady=5)
+            
+            ctk.CTkLabel(
+                error_frame,
+                text="See AI_INTEGRATION_README.md for full documentation",
+                font=("Arial", 11, "italic"),
+                text_color="gray"
+            ).pack(pady=20)
+    
+    def get_ai_context(self):
+        """Get current application context for AI"""
+        # Get current tab
+        current_tab = self.tabview.get()
+        
+        # Basic stats
+        context = {
+            "current_tab": current_tab,
+            "total_matched_products": len(data_store.matched_products),
+            "unmatched_woo": len(data_store.unmatched_woo),
+            "unmatched_capital": len(data_store.unmatched_capital)
+        }
+        
+        # Add product samples with key info
+        if data_store.matched_products:
+            products_sample = []
+            for p in data_store.matched_products[:20]:  # First 20 products
+                products_sample.append({
+                    "sku": p.get("sku", ""),
+                    "name": p.get("name", "")[:50],  # Truncate long names
+                    "woo_price": p.get("woo_price", 0),
+                    "capital_price": p.get("capital_price", 0),
+                    "price_match": p.get("price_match", False),
+                    "brand": p.get("brand", ""),
+                    "stock": p.get("stock", 0),
+                    "sales": p.get("sales", 0)
+                })
+            context["sample_products"] = products_sample
+            
+            # Add price mismatch count
+            price_mismatches = [p for p in data_store.matched_products if not p.get("price_match", False)]
+            context["price_mismatches"] = len(price_mismatches)
+            
+            # Add zero price count
+            zero_prices = [p for p in data_store.matched_products if p.get("woo_price", 0) == 0]
+            context["zero_prices"] = len(zero_prices)
+        
+        return context
         
     def log(self, message):
         """Add a log message"""
