@@ -926,6 +926,26 @@ class BridgeApp(ctk.CTk):
         self.product_category_filter.grid(row=0, column=5, padx=5, pady=5)
         self.product_category_filter.set("All Brands")
         
+        # Enable mouse wheel scrolling on brand dropdown
+        def scroll_brand_dropdown(event):
+            current_values = self.product_category_filter.cget("values")
+            current_value = self.product_category_filter.get()
+            try:
+                current_index = current_values.index(current_value)
+                if event.delta > 0 or event.num == 4:  # Scroll up
+                    new_index = max(0, current_index - 1)
+                else:  # Scroll down
+                    new_index = min(len(current_values) - 1, current_index + 1)
+                self.product_category_filter.set(current_values[new_index])
+            except (ValueError, IndexError):
+                pass
+        
+        # Bind mouse wheel events (Windows/Linux)
+        self.product_category_filter.bind("<MouseWheel>", scroll_brand_dropdown)
+        # Bind mouse wheel events (Linux alternative)
+        self.product_category_filter.bind("<Button-4>", scroll_brand_dropdown)
+        self.product_category_filter.bind("<Button-5>", scroll_brand_dropdown)
+        
           # Filter button
         ctk.CTkButton(
             filter_frame,
@@ -1016,7 +1036,7 @@ class BridgeApp(ctk.CTk):
         # Create treeview with scrollbars
         columns = (
             "☑", "SKU", "Name", "WOO Price", "Capital Price", 
-            "Sale Price", "Discount %", "WOO Stock", "Capital Stock", "Total Sales", "Match"
+            "Sale Price", "Discount %", "WOO Stock", "Total Sales", "Match"
         )
         
         self.products_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
@@ -1033,7 +1053,6 @@ class BridgeApp(ctk.CTk):
         self.products_tree.heading("Sale Price", text="Sale Price €")
         self.products_tree.heading("Discount %", text="Discount %")
         self.products_tree.heading("WOO Stock", text="WOO Stock")
-        self.products_tree.heading("Capital Stock", text="Capital Stock")
         self.products_tree.heading("Total Sales", text="Sales")
         self.products_tree.heading("Match", text="Match")
         
@@ -1045,7 +1064,6 @@ class BridgeApp(ctk.CTk):
         self.products_tree.column("Sale Price", width=100)
         self.products_tree.column("Discount %", width=80)
         self.products_tree.column("WOO Stock", width=80)
-        self.products_tree.column("Capital Stock", width=90)
         self.products_tree.column("Total Sales", width=60)
         self.products_tree.column("Match", width=60)
         
@@ -1114,7 +1132,6 @@ class BridgeApp(ctk.CTk):
                 f"{product.get('woo_sale_price', 0):.2f}" if product.get('woo_sale_price') else "-",
                 f"{product.get('woo_discount_percent', 0):.1f}%" if product.get('woo_discount_percent') is not None else "-",
                 product.get('woo_stock_quantity', '-'),
-                f"{product.get('capital_stock', 0):.0f}" if product.get('capital_stock') is not None else "-",
                 product.get('woo_total_sales', 0),
                 match_status
             ))
@@ -2733,32 +2750,32 @@ class ProductEditorDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=16, weight="bold")
         ).pack(pady=5)
         
-        ctk.CTkLabel(
-            info_frame,
-            text=self.product.get('woo_name', 'No name'),
-            font=ctk.CTkFont(size=14)
-        ).pack(pady=5)
-        
         # Form
-        form_frame = ctk.CTkFrame(self)
+        form_frame = ctk.CTkScrollableFrame(self)
         form_frame.pack(fill="both", expand=True, padx=20, pady=10)
         
+        # Product Name
+        ctk.CTkLabel(form_frame, text="Product Name:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        self.name_entry = ctk.CTkEntry(form_frame, width=400)
+        self.name_entry.grid(row=0, column=1, columnspan=2, padx=10, pady=10, sticky="ew")
+        self.name_entry.insert(0, self.product.get('woo_name', ''))
+        
         # Regular price
-        ctk.CTkLabel(form_frame, text="Regular Price (€):").grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        ctk.CTkLabel(form_frame, text="Regular Price (€):").grid(row=1, column=0, padx=10, pady=10, sticky="w")
         self.regular_price_entry = ctk.CTkEntry(form_frame, width=150)
-        self.regular_price_entry.grid(row=0, column=1, padx=10, pady=10)
+        self.regular_price_entry.grid(row=1, column=1, padx=10, pady=10)
         self.regular_price_entry.insert(0, str(self.product.get('woo_regular_price', '')))
         
         ctk.CTkLabel(
             form_frame,
             text=f"Capital: €{self.product.get('capital_rtlprice', 0):.2f}",
             text_color="gray"
-        ).grid(row=0, column=2, padx=10, pady=10)
+        ).grid(row=1, column=2, padx=10, pady=10)
         
         # Sale price
-        ctk.CTkLabel(form_frame, text="Sale Price (€):").grid(row=1, column=0, padx=10, pady=10, sticky="w")
+        ctk.CTkLabel(form_frame, text="Sale Price (€):").grid(row=2, column=0, padx=10, pady=10, sticky="w")
         self.sale_price_entry = ctk.CTkEntry(form_frame, width=150)
-        self.sale_price_entry.grid(row=1, column=1, padx=10, pady=10)
+        self.sale_price_entry.grid(row=2, column=1, padx=10, pady=10)
         if self.product.get('woo_sale_price'):
             self.sale_price_entry.insert(0, str(self.product.get('woo_sale_price', '')))
             
@@ -2768,18 +2785,18 @@ class ProductEditorDialog(ctk.CTkToplevel):
             text="Calculate Discount",
             command=self.calculate_discount,
             width=120
-        ).grid(row=1, column=2, padx=10, pady=10)
+        ).grid(row=2, column=2, padx=10, pady=10)
         
         # Short description
-        ctk.CTkLabel(form_frame, text="Short Description:").grid(row=2, column=0, padx=10, pady=10, sticky="nw")
+        ctk.CTkLabel(form_frame, text="Short Description:").grid(row=3, column=0, padx=10, pady=10, sticky="nw")
         self.short_desc_text = ctk.CTkTextbox(form_frame, width=400, height=80)
-        self.short_desc_text.grid(row=2, column=1, columnspan=2, padx=10, pady=10)
+        self.short_desc_text.grid(row=3, column=1, columnspan=2, padx=10, pady=10)
         self.short_desc_text.insert("1.0", self.product.get('woo_short_description', ''))
         
         # Description
-        ctk.CTkLabel(form_frame, text="Description:").grid(row=3, column=0, padx=10, pady=10, sticky="nw")
+        ctk.CTkLabel(form_frame, text="Description:").grid(row=4, column=0, padx=10, pady=10, sticky="nw")
         self.desc_text = ctk.CTkTextbox(form_frame, width=400, height=150)
-        self.desc_text.grid(row=3, column=1, columnspan=2, padx=10, pady=10)
+        self.desc_text.grid(row=4, column=1, columnspan=2, padx=10, pady=10)
         self.desc_text.insert("1.0", self.product.get('woo_description', ''))
         
         # Buttons
@@ -2827,6 +2844,11 @@ class ProductEditorDialog(ctk.CTkToplevel):
         try:
             data = {}
             
+            # Product name
+            name = self.name_entry.get().strip()
+            if name:
+                data['name'] = name
+            
             # Price
             regular_price = self.regular_price_entry.get().strip()
             if regular_price:
@@ -2842,8 +2864,20 @@ class ProductEditorDialog(ctk.CTkToplevel):
             description = self.desc_text.get("1.0", "end").strip()
             data['description'] = description
             
-            # Update WooCommerce
-            self.woo_client.update_product(self.product['woo_id'], data)
+            # Check if this is a variation
+            parent_id = self.product.get('parent_id')
+            product_id = self.product['woo_id']
+            
+            # Update WooCommerce using correct endpoint
+            if parent_id:
+                # It's a variation - use variation endpoint
+                endpoint = f"products/{parent_id}/variations/{product_id}"
+                response = self.woo_client.wcapi.put(endpoint, data)
+                if response.status_code not in [200, 201]:
+                    raise Exception(f"WooCommerce API error: {response.status_code} - {response.text}")
+            else:
+                # Regular product
+                self.woo_client.update_product(product_id, data)
             
             # Record in database
             if 'regular_price' in data:
