@@ -1,0 +1,190 @@
+"""
+AI Chat Assistant for BRIDGE
+Natural language interface for product management
+"""
+
+import customtkinter as ctk
+from typing import Dict, Any
+from ai_client import BridgeAI
+import threading
+
+class AIChatAssistant(ctk.CTkFrame):
+    """Chat interface for AI assistant"""
+    
+    def __init__(self, parent, get_context: callable = None):
+        super().__init__(parent)
+        
+        self.ai = BridgeAI()
+        self.get_context = get_context  # Function to get current app context
+        self.chat_history = []
+        
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup the chat assistant UI"""
+        # Header
+        header = ctk.CTkFrame(self)
+        header.pack(fill="x", padx=10, pady=10)
+        
+        ctk.CTkLabel(
+            header,
+            text="💬 AI Assistant",
+            font=("Arial", 18, "bold")
+        ).pack(side="left", padx=10)
+        
+        self.status_label = ctk.CTkLabel(
+            header,
+            text="Ready" if self.ai.is_available() else "Not configured",
+            font=("Arial", 12),
+            text_color="green" if self.ai.is_available() else "red"
+        )
+        self.status_label.pack(side="left", padx=20)
+        
+        ctk.CTkButton(
+            header,
+            text="🗑️ Clear Chat",
+            command=self.clear_chat,
+            width=100
+        ).pack(side="right", padx=5)
+        
+        # Chat display area
+        self.chat_display = ctk.CTkTextbox(
+            self,
+            wrap="word",
+            font=("Arial", 12)
+        )
+        self.chat_display.pack(fill="both", expand=True, padx=10, pady=10)
+        self.chat_display.configure(state="disabled")
+        
+        # Input area
+        input_frame = ctk.CTkFrame(self)
+        input_frame.pack(fill="x", padx=10, pady=10)
+        
+        self.input_field = ctk.CTkEntry(
+            input_frame,
+            placeholder_text="Ask me anything about your products...",
+            font=("Arial", 12)
+        )
+        self.input_field.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.input_field.bind("<Return>", lambda e: self.send_message())
+        
+        self.send_button = ctk.CTkButton(
+            input_frame,
+            text="Send",
+            command=self.send_message,
+            width=100
+        )
+        self.send_button.pack(side="right")
+        
+        # Quick actions
+        quick_frame = ctk.CTkFrame(self)
+        quick_frame.pack(fill="x", padx=10, pady=(0, 10))
+        
+        ctk.CTkLabel(quick_frame, text="Quick actions:").pack(side="left", padx=5)
+        
+        quick_actions = [
+            ("Find issues", "Find all products with price or data issues"),
+            ("Top products", "Show me the top 10 best-selling products"),
+            ("Price analysis", "Analyze pricing across all products"),
+            ("Suggestions", "Give me suggestions for improving my products")
+        ]
+        
+        for label, prompt in quick_actions:
+            ctk.CTkButton(
+                quick_frame,
+                text=label,
+                command=lambda p=prompt: self.send_quick_action(p),
+                width=100,
+                height=25,
+                font=("Arial", 10)
+            ).pack(side="left", padx=2)
+        
+        # Welcome message
+        if self.ai.is_available():
+            self._add_message("AI", "Hello! I'm your AI assistant. I can help you analyze products, find issues, and provide insights. What would you like to know?")
+        else:
+            self._add_message("System", "AI assistant is not configured. Please add your Claude API key in Settings to enable AI features.")
+    
+    def send_message(self):
+        """Send user message to AI"""
+        message = self.input_field.get().strip()
+        if not message:
+            return
+        
+        # Clear input
+        self.input_field.delete(0, "end")
+        
+        # Add user message to chat
+        self._add_message("You", message)
+        
+        # Show typing indicator
+        self.status_label.configure(text="Thinking...", text_color="orange")
+        self.send_button.configure(state="disabled")
+        
+        # Get AI response in background
+        threading.Thread(target=self._get_ai_response, args=(message,), daemon=True).start()
+    
+    def send_quick_action(self, prompt: str):
+        """Send a quick action prompt"""
+        self.input_field.delete(0, "end")
+        self.input_field.insert(0, prompt)
+        self.send_message()
+    
+    def _get_ai_response(self, message: str):
+        """Get AI response (runs in background thread)"""
+        try:
+            # Get current context
+            context = self.get_context() if self.get_context else None
+            
+            # Get AI response
+            response = self.ai.chat(message, context)
+            
+            # Add to chat (must be done in main thread)
+            self.after(0, lambda: self._add_message("AI", response))
+            self.after(0, lambda: self.status_label.configure(text="Ready", text_color="green"))
+            self.after(0, lambda: self.send_button.configure(state="normal"))
+            
+        except Exception as e:
+            error_msg = f"Error: {str(e)}"
+            self.after(0, lambda: self._add_message("System", error_msg))
+            self.after(0, lambda: self.status_label.configure(text="Error", text_color="red"))
+            self.after(0, lambda: self.send_button.configure(state="normal"))
+    
+    def _add_message(self, sender: str, message: str):
+        """Add a message to the chat display"""
+        self.chat_history.append({"sender": sender, "message": message})
+        
+        # Enable editing
+        self.chat_display.configure(state="normal")
+        
+        # Add sender label
+        if sender == "You":
+            self.chat_display.insert("end", f"\n{sender}: ", "user")
+        elif sender == "AI":
+            self.chat_display.insert("end", f"\n{sender}: ", "ai")
+        else:
+            self.chat_display.insert("end", f"\n{sender}: ", "system")
+        
+        # Add message
+        self.chat_display.insert("end", f"{message}\n")
+        
+        # Configure tags for styling
+        self.chat_display.tag_config("user", foreground="#4444ff", font=("Arial", 12, "bold"))
+        self.chat_display.tag_config("ai", foreground="#00aa00", font=("Arial", 12, "bold"))
+        self.chat_display.tag_config("system", foreground="#888888", font=("Arial", 12, "italic"))
+        
+        # Disable editing
+        self.chat_display.configure(state="disabled")
+        
+        # Scroll to bottom
+        self.chat_display.see("end")
+    
+    def clear_chat(self):
+        """Clear chat history"""
+        self.chat_history = []
+        self.chat_display.configure(state="normal")
+        self.chat_display.delete("1.0", "end")
+        self.chat_display.configure(state="disabled")
+        
+        if self.ai.is_available():
+            self._add_message("AI", "Chat cleared. How can I help you?")

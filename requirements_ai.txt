@@ -1,0 +1,4 @@
+# AI Integration Requirements for BRIDGE
+# Install with: sudo pip3 install -r requirements_ai.txt
+
+anthropic>=0.39.0  # Claude API client
