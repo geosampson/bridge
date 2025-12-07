@@ -7,6 +7,7 @@ import json
 import anthropic
 from typing import List, Dict, Any, Optional
 from ai_config import AIConfig
+from ai_system_knowledge import get_system_knowledge
 
 class BridgeAI:
     """AI assistant for BRIDGE using Claude API"""
@@ -285,15 +286,12 @@ Return response as JSON with insights and recommendations."""
     
     def _create_chat_prompt(self, message: str, context: Optional[Dict]) -> str:
         """Create prompt for chat interaction"""
-        base_prompt = f"""You are an AI assistant for BRIDGE, a WooCommerce and Capital ERP product management system.
-
-You have access to the complete product database with the following information:
-- Product SKUs, names, prices (WooCommerce and Capital ERP)
-- Brands, categories, stock quantities, sales data
-- Price matching status and discount information
-
-User question: {message}
-"""
+        # Start with system knowledge
+        base_prompt = get_system_knowledge()
+        
+        base_prompt += f"\n\n{'='*80}\n"
+        base_prompt += f"USER QUESTION: {message}\n"
+        base_prompt += f"{'='*80}\n"
 
         if context:
             # Check if data is loaded
@@ -326,16 +324,19 @@ User question: {message}
                     base_prompt += f"\n**Sample of {sample_size} products from database:**\n"
                     base_prompt += json.dumps(context["all_products"][:sample_size], indent=2)
         
-        base_prompt += """\n\n**Instructions:**
-1. Answer the user's question using the actual product data provided above
-2. Be specific - include SKUs, product names, and exact counts
-3. If the user asks about issues or problems, list them clearly with details
-4. If you identify issues that can be fixed, suggest specific actions
-5. Always end your response by asking: "Would you like me to help fix these issues?" (if issues were found)
-6. Remember: You can only suggest actions - the user must approve before any changes are made
-7. If no data is loaded, politely ask the user to fetch data first
+        base_prompt += "\n\n" + "="*80 + "\n"
+        base_prompt += "RESPONSE INSTRUCTIONS\n"
+        base_prompt += "="*80 + "\n\n"
+        base_prompt += """1. **Use System Knowledge**: Apply the business rules and data structure knowledge above
+2. **Remember**: Capital ERP is the source of truth - WooCommerce should match Capital
+3. **Be Specific**: Include SKUs, product names, exact counts from the data
+4. **Prioritize Issues**: Use HIGH/MEDIUM/LOW severity based on system knowledge
+5. **Suggest Fixes**: Explain WHAT to fix, WHY, and WHICH system needs updating
+6. **Ask for Approval**: End with "Would you like me to help fix these issues?" if issues found
+7. **No Data**: If data not loaded, ask user to click 'Fetch All Data'
 
-Provide a clear, actionable response:"""
+Provide a clear, actionable response based on system knowledge and current data:
+"""
         
         return base_prompt
     
