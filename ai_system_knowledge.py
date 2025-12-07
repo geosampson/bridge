@@ -146,6 +146,17 @@ Would you like me to help fix these issues?"
 - Primary concern: Keeping WooCommerce in sync with Capital ERP
 - Goal: Accurate pricing and product data on online store
 - Workflow: Capital → BRIDGE → WooCommerce (one-way sync)
+
+## AI CAPABILITIES - ACTIONS YOU CAN PERFORM
+
+You can execute these actions with user approval:
+
+1. Brand Assignment: Detect and assign brands to products
+2. Product Editing: Update names, descriptions, SKUs
+3. Variation Detection: Identify product families by size/color
+4. Smart Matching: Link unmatched Capital and WooCommerce products
+
+Always suggest actions clearly and wait for user approval before executing.
 """
 
 def get_system_knowledge() -> str:

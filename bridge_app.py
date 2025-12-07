@@ -2231,10 +2231,11 @@ class BridgeApp(ctk.CTk):
             self.tab_ai.grid_columnconfigure(0, weight=1)
             self.tab_ai.grid_rowconfigure(0, weight=1)
             
-            # Create AI chat assistant with context function
+            # Create AI chat assistant with context and action execution
             self.ai_chat = AIChatAssistant(
                 self.tab_ai,
-                get_context=self.get_ai_context
+                get_context=self.get_ai_context,
+                execute_action=self.execute_ai_action
             )
             self.ai_chat.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
             
@@ -2341,7 +2342,65 @@ class BridgeApp(ctk.CTk):
             no_description = [p for p in data_store.matched_products if not p.get("woo_description", "").strip()]
             context["no_description_count"] = len(no_description)
             
+            # Add unmatched products for matching suggestions
+            context["unmatched_woo_count"] = len(data_store.unmatched_woo)
+            context["unmatched_capital_count"] = len(data_store.unmatched_capital)
+            
         return context
+    
+    def execute_ai_action(self, action_type: str, action_data: dict) -> str:
+        """Execute an AI-suggested action after user approval"""
+        try:
+            # Initialize actions module if not already done
+            if not hasattr(self, 'ai_actions'):
+                from ai_actions import BridgeActions
+                self.ai_actions = BridgeActions(
+                    WOOCOMMERCE_CONFIG,
+                    CAPITAL_CONFIG,
+                    data_store
+                )
+            
+            # Execute based on action type
+            if action_type == 'assign_brand':
+                woo_id = action_data.get('woo_id')
+                brand_name = action_data.get('brand_name')
+                result = self.ai_actions.assign_brand_to_product(woo_id, brand_name)
+                return result.get('message', 'Unknown result')
+            
+            elif action_type == 'bulk_assign_brands':
+                assignments = action_data.get('assignments', [])
+                result = self.ai_actions.bulk_assign_brands(assignments)
+                return f"Assigned {result['success']} brands, {result['failed']} failed"
+            
+            elif action_type == 'update_name':
+                woo_id = action_data.get('woo_id')
+                new_name = action_data.get('new_name')
+                result = self.ai_actions.update_product_name(woo_id, new_name)
+                return result.get('message', 'Unknown result')
+            
+            elif action_type == 'update_description':
+                woo_id = action_data.get('woo_id')
+                new_description = action_data.get('new_description')
+                result = self.ai_actions.update_product_description(woo_id, new_description)
+                return result.get('message', 'Unknown result')
+            
+            elif action_type == 'update_sku':
+                woo_id = action_data.get('woo_id')
+                new_sku = action_data.get('new_sku')
+                result = self.ai_actions.update_product_sku(woo_id, new_sku)
+                return result.get('message', 'Unknown result')
+            
+            elif action_type == 'create_match':
+                capital_sku = action_data.get('capital_sku')
+                woo_id = action_data.get('woo_id')
+                result = self.ai_actions.create_product_match(capital_sku, woo_id)
+                return result.get('message', 'Unknown result')
+            
+            else:
+                return f"Unknown action type: {action_type}"
+                
+        except Exception as e:
+            return f"Error executing action: {str(e)}"
         
     def log(self, message):
         """Add a log message"""
