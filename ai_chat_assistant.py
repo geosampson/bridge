@@ -11,12 +11,14 @@ import threading
 class AIChatAssistant(ctk.CTkFrame):
     """Chat interface for AI assistant"""
     
-    def __init__(self, parent, get_context: callable = None):
+    def __init__(self, parent, get_context: callable = None, execute_action: callable = None):
         super().__init__(parent)
         
         self.ai = BridgeAI()
         self.get_context = get_context  # Function to get current app context
+        self.execute_action = execute_action  # Function to execute approved actions
         self.chat_history = []
+        self.pending_actions = []  # Store suggested actions awaiting approval
         
         self.setup_ui()
     
@@ -133,6 +135,22 @@ class AIChatAssistant(ctk.CTkFrame):
     def _get_ai_response(self, message: str):
         """Get AI response (runs in background thread)"""
         try:
+            # Check for approval keywords
+            message_lower = message.lower().strip()
+            if message_lower in ["yes", "y", "approve", "proceed", "do it", "go ahead"]:
+                if self.pending_actions:
+                    self.after(0, self.execute_pending_actions)
+                    self.after(0, lambda: self.status_label.configure(text="Ready", text_color="green"))
+                    self.after(0, lambda: self.send_button.configure(state="normal"))
+                    return
+            
+            if message_lower in ["no", "n", "cancel", "stop", "don't", "dont"]:
+                if self.pending_actions:
+                    self.after(0, self.cancel_pending_actions)
+                    self.after(0, lambda: self.status_label.configure(text="Ready", text_color="green"))
+                    self.after(0, lambda: self.send_button.configure(state="normal"))
+                    return
+            
             # Get current context
             context = self.get_context() if self.get_context else None
             
@@ -182,9 +200,58 @@ class AIChatAssistant(ctk.CTkFrame):
     def clear_chat(self):
         """Clear chat history"""
         self.chat_history = []
+        self.pending_actions = []
         self.chat_display.configure(state="normal")
         self.chat_display.delete("1.0", "end")
         self.chat_display.configure(state="disabled")
         
         if self.ai.is_available():
             self._add_message("AI", "Chat cleared. How can I help you?")
+    
+    def show_action_approval(self, actions: list):
+        """Show action approval dialog"""
+        if not actions:
+            return
+        
+        # Store pending actions
+        self.pending_actions = actions
+        
+        # Create approval message
+        approval_msg = "\n\n🔧 **Suggested Actions:**\n"
+        for i, action in enumerate(actions, 1):
+            approval_msg += f"{i}. {action.get('description', 'Unknown action')}\n"
+        approval_msg += "\nWould you like me to proceed with these actions? (Reply 'yes' to approve, 'no' to cancel)"
+        
+        self._add_message("AI", approval_msg)
+    
+    def execute_pending_actions(self):
+        """Execute all pending actions after user approval"""
+        if not self.pending_actions:
+            self._add_message("System", "No pending actions to execute.")
+            return
+        
+        if not self.execute_action:
+            self._add_message("System", "Action execution is not available. Please use the manual tools in other tabs.")
+            return
+        
+        self._add_message("System", f"Executing {len(self.pending_actions)} actions...")
+        
+        # Execute actions (this would call back to the main app)
+        for action in self.pending_actions:
+            action_type = action.get('type')
+            action_data = action.get('data', {})
+            
+            try:
+                result = self.execute_action(action_type, action_data)
+                self._add_message("System", f"✓ {action.get('description')}: {result}")
+            except Exception as e:
+                self._add_message("System", f"✗ {action.get('description')}: Failed - {str(e)}")
+        
+        self.pending_actions = []
+        self._add_message("AI", "All actions completed. Is there anything else I can help with?")
+    
+    def cancel_pending_actions(self):
+        """Cancel pending actions"""
+        count = len(self.pending_actions)
+        self.pending_actions = []
+        self._add_message("System", f"Cancelled {count} pending action(s).")

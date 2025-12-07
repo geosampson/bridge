@@ -2287,33 +2287,60 @@ class BridgeApp(ctk.CTk):
             "current_tab": current_tab,
             "total_matched_products": len(data_store.matched_products),
             "unmatched_woo": len(data_store.unmatched_woo),
-            "unmatched_capital": len(data_store.unmatched_capital)
+            "unmatched_capital": len(data_store.unmatched_capital),
+            "data_loaded": data_store.last_fetch_time is not None
         }
         
-        # Add product samples with key info
+        # Add product data with full details
         if data_store.matched_products:
-            products_sample = []
-            for p in data_store.matched_products[:20]:  # First 20 products
-                products_sample.append({
+            # Collect all products with key fields
+            all_products = []
+            for p in data_store.matched_products:
+                all_products.append({
                     "sku": p.get("sku", ""),
-                    "name": p.get("name", "")[:50],  # Truncate long names
-                    "woo_price": p.get("woo_price", 0),
-                    "capital_price": p.get("capital_price", 0),
+                    "woo_name": p.get("woo_name", ""),
+                    "capital_name": p.get("capital_name", ""),
+                    "woo_regular_price": p.get("woo_regular_price", 0),
+                    "woo_sale_price": p.get("woo_sale_price", 0),
+                    "capital_rtlprice": p.get("capital_rtlprice", 0),
                     "price_match": p.get("price_match", False),
-                    "brand": p.get("brand", ""),
-                    "stock": p.get("stock", 0),
-                    "sales": p.get("sales", 0)
+                    "woo_brand": p.get("woo_brand", ""),
+                    "woo_categories": p.get("woo_categories", []),
+                    "woo_stock_quantity": p.get("woo_stock_quantity", 0),
+                    "woo_total_sales": p.get("woo_total_sales", 0),
+                    "woo_discount_percent": p.get("woo_discount_percent", 0),
+                    "woo_description": p.get("woo_description", "")[:100] if p.get("woo_description") else ""
                 })
-            context["sample_products"] = products_sample
             
-            # Add price mismatch count
+            context["all_products"] = all_products
+            
+            # Add specific issue counts
             price_mismatches = [p for p in data_store.matched_products if not p.get("price_match", False)]
             context["price_mismatches"] = len(price_mismatches)
             
-            # Add zero price count
-            zero_prices = [p for p in data_store.matched_products if p.get("woo_price", 0) == 0]
+            zero_prices = [p for p in data_store.matched_products if p.get("woo_regular_price", 0) == 0]
             context["zero_prices"] = len(zero_prices)
-        
+            context["zero_price_products"] = [p.get("sku") for p in zero_prices[:50]]  # First 50 SKUs
+            
+            # Brand mismatches (brand in name but not in brand field)
+            brand_issues = []
+            for p in data_store.matched_products:
+                name = p.get("woo_name", "").lower()
+                brand = p.get("woo_brand", "").lower()
+                # Check if product has no brand but name contains common brand keywords
+                if not brand and any(keyword in name for keyword in ["nike", "adidas", "puma", "reebok", "samsung", "lg", "sony"]):
+                    brand_issues.append({
+                        "sku": p.get("sku"),
+                        "name": p.get("woo_name", "")[:50],
+                        "brand": brand
+                    })
+            context["brand_issues"] = len(brand_issues)
+            context["brand_issue_products"] = brand_issues[:20]  # First 20
+            
+            # Missing descriptions
+            no_description = [p for p in data_store.matched_products if not p.get("woo_description", "").strip()]
+            context["no_description_count"] = len(no_description)
+            
         return context
         
     def log(self, message):

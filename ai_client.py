@@ -287,12 +287,55 @@ Return response as JSON with insights and recommendations."""
         """Create prompt for chat interaction"""
         base_prompt = f"""You are an AI assistant for BRIDGE, a WooCommerce and Capital ERP product management system.
 
-User message: {message}"""
+You have access to the complete product database with the following information:
+- Product SKUs, names, prices (WooCommerce and Capital ERP)
+- Brands, categories, stock quantities, sales data
+- Price matching status and discount information
+
+User question: {message}
+"""
 
         if context:
-            base_prompt += f"\n\nCurrent context:\n{json.dumps(context, indent=2)}"
+            # Check if data is loaded
+            if not context.get("data_loaded", False):
+                base_prompt += "\n**IMPORTANT**: No product data has been loaded yet. Please ask the user to click 'Fetch All Data' first.\n"
+            else:
+                # Add summary statistics
+                base_prompt += f"\n**Database Summary:**\n"
+                base_prompt += f"- Total matched products: {context.get('total_matched_products', 0)}\n"
+                base_prompt += f"- Products with zero price: {context.get('zero_prices', 0)}\n"
+                base_prompt += f"- Products with price mismatches: {context.get('price_mismatches', 0)}\n"
+                base_prompt += f"- Products with brand issues: {context.get('brand_issues', 0)}\n"
+                base_prompt += f"- Products without descriptions: {context.get('no_description_count', 0)}\n"
+                
+                # Add relevant product data based on query
+                if any(keyword in message.lower() for keyword in ["zero", "price", "0", "€0"]):
+                    if context.get("zero_price_products"):
+                        base_prompt += f"\n**Products with zero price (SKUs):** {', '.join(context['zero_price_products'][:30])}\n"
+                
+                if any(keyword in message.lower() for keyword in ["brand", "category", "categorize"]):
+                    if context.get("brand_issue_products"):
+                        base_prompt += f"\n**Products with brand issues:**\n"
+                        for item in context['brand_issue_products'][:10]:
+                            base_prompt += f"  - SKU {item['sku']}: {item['name']} (brand: '{item['brand']}')\n"
+                
+                # For general queries, include sample products
+                if "all_products" in context and len(context["all_products"]) > 0:
+                    # Limit to first 50 products to avoid token limits
+                    sample_size = min(50, len(context["all_products"]))
+                    base_prompt += f"\n**Sample of {sample_size} products from database:**\n"
+                    base_prompt += json.dumps(context["all_products"][:sample_size], indent=2)
         
-        base_prompt += "\n\nProvide a helpful, concise response. If the user asks to perform an action, explain what would be done but note that you cannot execute actions directly (user must approve)."
+        base_prompt += """\n\n**Instructions:**
+1. Answer the user's question using the actual product data provided above
+2. Be specific - include SKUs, product names, and exact counts
+3. If the user asks about issues or problems, list them clearly with details
+4. If you identify issues that can be fixed, suggest specific actions
+5. Always end your response by asking: "Would you like me to help fix these issues?" (if issues were found)
+6. Remember: You can only suggest actions - the user must approve before any changes are made
+7. If no data is loaded, politely ask the user to fetch data first
+
+Provide a clear, actionable response:"""
         
         return base_prompt
     
