@@ -168,10 +168,10 @@ class AIChatAssistant(ctk.CTkFrame):
         # Add message
         self.chat_display.insert("end", f"{message}\n")
         
-        # Configure tags for styling
-        self.chat_display.tag_config("user", foreground="#4444ff", font=("Arial", 12, "bold"))
-        self.chat_display.tag_config("ai", foreground="#00aa00", font=("Arial", 12, "bold"))
-        self.chat_display.tag_config("system", foreground="#888888", font=("Arial", 12, "italic"))
+        # Configure tags for styling (font removed for Windows compatibility)
+        self.chat_display.tag_config("user", foreground="#4444ff")
+        self.chat_display.tag_config("ai", foreground="#00aa00")
+        self.chat_display.tag_config("system", foreground="#888888")
         
         # Disable editing
         self.chat_display.configure(state="disabled")
