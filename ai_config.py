@@ -25,7 +25,7 @@ class AIConfig:
                 "enabled": True,
                 "api_provider": "claude",  # claude, openai, local
                 "api_key": os.getenv("ANTHROPIC_API_KEY", ""),
-                "model": "claude-3-5-sonnet-20241022",  # Latest Claude model
+                "model": "claude-sonnet-4-5-20250929",  # Claude Sonnet 4.5 (current)
                 "features": {
                     "anomaly_detection": True,
                     "auto_suggestions": True,
@@ -58,7 +58,7 @@ class AIConfig:
     
     def get_model(self):
         """Get AI model name"""
-        return self.config.get("model", "claude-3-5-sonnet-20241022")
+        return self.config.get("model", "claude-sonnet-4-5-20250929")
     
     def is_feature_enabled(self, feature):
         """Check if specific feature is enabled"""
