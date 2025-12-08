@@ -1017,8 +1017,8 @@ class BridgeApp(ctk.CTk):
         data_store.add_data_listener(self.on_data_updated)
         data_store.add_loading_listener(self.on_loading_updated)
         
-        # Auto-load data on startup
-        self.after(500, self.auto_load_on_startup)
+        # Auto-load data on startup (in background thread)
+        self.after(500, lambda: threading.Thread(target=self.auto_load_on_startup, daemon=True).start())
         
     def setup_ui(self):
         """Setup the main UI"""
@@ -2787,7 +2787,11 @@ class BridgeApp(ctk.CTk):
     def auto_load_on_startup(self):
         """Auto-load data on startup using smart loader"""
         print("Auto-loading data on startup...")
-        self.smart_loader.load_on_startup(on_complete=self.on_startup_load_complete)
+        self.log("Auto-loading data on startup...")
+        self.smart_loader.load_on_startup(
+            on_complete=self.on_startup_load_complete,
+            log_callback=self.log
+        )
     
     def on_startup_load_complete(self, background=False):
         """Called when startup load completes"""
