@@ -1062,7 +1062,7 @@ class BridgeApp(ctk.CTk):
         self.fetch_btn = ctk.CTkButton(
             top_frame,
             text="📥 Fetch All Data",
-            command=self.start_data_fetch,
+            command=self.on_fetch_data,
             font=ctk.CTkFont(size=14, weight="bold"),
             width=150
         )
