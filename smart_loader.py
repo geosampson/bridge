@@ -59,7 +59,7 @@ class SmartDataLoader:
             self.data_store.set_loading(True, 40, "Fetching Capital products...")
             
             try:
-                self.data_store.capital_products = self.capital_client.get_all_products()
+                self.data_store.capital_products = self.capital_client.get_products()
                 log(f"✓ Fetched {len(self.data_store.capital_products)} Capital products")
                 
                 # Cache Capital data
@@ -102,7 +102,15 @@ class SmartDataLoader:
             self.data_store.set_loading(True, 90, "Matching products...")
             
             try:
-                self.data_store.match_products()
+                from bridge_app import ProductMatcher
+                matched, unmatched_woo, unmatched_capital = ProductMatcher.match_products(
+                    self.data_store.woo_products,
+                    self.data_store.capital_products
+                )
+                self.data_store.matched_products = matched
+                self.data_store.unmatched_woo = unmatched_woo
+                self.data_store.unmatched_capital = unmatched_capital
+                self.data_store.notify_data_changed()
                 log("✓ Product matching complete")
             except Exception as e:
                 log(f"Error matching products: {e}")
@@ -178,12 +186,20 @@ class SmartDataLoader:
                 
                 if fetch_capital:
                     self.data_store.set_loading(True, 60, "Fetching Capital...")
-                    self.data_store.capital_products = self.capital_client.get_all_products()
+                    self.data_store.capital_products = self.capital_client.get_products()
                     self.database.cache_capital_products(self.data_store.capital_products)
                     print(f"✓ Fetched {len(self.data_store.capital_products)} Capital products")
                 
                 self.data_store.set_loading(True, 90, "Matching products...")
-                self.data_store.match_products()
+                from bridge_app import ProductMatcher
+                matched, unmatched_woo, unmatched_capital = ProductMatcher.match_products(
+                    self.data_store.woo_products,
+                    self.data_store.capital_products
+                )
+                self.data_store.matched_products = matched
+                self.data_store.unmatched_woo = unmatched_woo
+                self.data_store.unmatched_capital = unmatched_capital
+                self.data_store.notify_data_changed()
                 
                 self.data_store.set_loading(False, 100, "Ready")
                 
