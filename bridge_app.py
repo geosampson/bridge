@@ -634,6 +634,35 @@ class LocalDatabase:
             )
         ''')
         
+        # WooCommerce products cache
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS woo_products_cache (
+                id INTEGER PRIMARY KEY,
+                sku TEXT,
+                name TEXT,
+                regular_price REAL,
+                sale_price REAL,
+                stock_quantity INTEGER,
+                categories TEXT,
+                brands TEXT,
+                description TEXT,
+                product_data TEXT,
+                last_updated TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Capital products cache  
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS capital_products_cache (
+                sku TEXT PRIMARY KEY,
+                name TEXT,
+                rtlprice REAL,
+                stock INTEGER,
+                product_data TEXT,
+                last_updated TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         conn.commit()
         conn.close()
         
@@ -840,6 +869,108 @@ class LocalDatabase:
         
         conn.commit()
         conn.close()
+    
+    # ========================================================================
+    # PRODUCT CACHE METHODS
+    # ========================================================================
+    
+    def cache_woo_products(self, products):
+        """Cache WooCommerce products to database"""
+        import json
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Clear old cache
+        cursor.execute('DELETE FROM woo_products_cache')
+        
+        # Insert new cache
+        for product in products:
+            cursor.execute('''
+                INSERT INTO woo_products_cache 
+                (id, sku, name, regular_price, sale_price, stock_quantity, 
+                 categories, brands, description, product_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                product.get('id'),
+                product.get('sku', ''),
+                product.get('name', ''),
+                float(product.get('regular_price', 0)) if product.get('regular_price') else 0,
+                float(product.get('sale_price', 0)) if product.get('sale_price') else 0,
+                int(product.get('stock_quantity', 0)) if product.get('stock_quantity') else 0,
+                json.dumps(product.get('categories', [])),
+                json.dumps(product.get('brands', [])),
+                product.get('description', ''),
+                json.dumps(product)
+            ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_cached_woo_products(self):
+        """Get cached WooCommerce products"""
+        import json
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT product_data, last_updated FROM woo_products_cache')
+        
+        results = []
+        cache_time = None
+        for row in cursor.fetchall():
+            results.append(json.loads(row[0]))
+            if not cache_time:
+                cache_time = row[1]
+        
+        conn.close()
+        return results, cache_time
+    
+    def cache_capital_products(self, products):
+        """Cache Capital products to database"""
+        import json
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Clear old cache
+        cursor.execute('DELETE FROM capital_products_cache')
+        
+        # Insert new cache
+        for product in products:
+            cursor.execute('''
+                INSERT INTO capital_products_cache 
+                (sku, name, rtlprice, stock, product_data)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (
+                product.get('sku', ''),
+                product.get('name', ''),
+                float(product.get('rtlprice', 0)) if product.get('rtlprice') else 0,
+                int(product.get('stock', 0)) if product.get('stock') else 0,
+                json.dumps(product)
+            ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_cached_capital_products(self):
+        """Get cached Capital products"""
+        import json
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT product_data, last_updated FROM capital_products_cache')
+        
+        results = []
+        cache_time = None
+        for row in cursor.fetchall():
+            results.append(json.loads(row[0]))
+            if not cache_time:
+                cache_time = row[1]
+        
+        conn.close()
+        return results, cache_time
 
 
 # ============================================================================
@@ -859,11 +990,25 @@ class BridgeApp(ctk.CTk):
         # Initialize clients
         self.woo_client = WooCommerceClient(WOOCOMMERCE_CONFIG)
         self.capital_client = CapitalClient(CAPITAL_CONFIG)
-        self.db = LocalDatabase()
+        
+        # Initialize database with cloud storage support
+        from cloud_config import get_database_path
+        db_path = get_database_path()
+        self.db = LocalDatabase(db_path)
+        print(f"Database: {db_path}")
         
         # Initialize knowledge base
         from ai_knowledge_base import KnowledgeBase
         self.knowledge_base = KnowledgeBase(self.db)
+        
+        # Initialize smart loader
+        from smart_loader import SmartDataLoader
+        self.smart_loader = SmartDataLoader(
+            self.woo_client,
+            self.capital_client,
+            self.db,
+            data_store
+        )
         
         # Setup UI
         self.setup_ui()
@@ -871,6 +1016,9 @@ class BridgeApp(ctk.CTk):
         # Register for data updates
         data_store.add_data_listener(self.on_data_updated)
         data_store.add_loading_listener(self.on_loading_updated)
+        
+        # Auto-load data on startup
+        self.after(500, self.auto_load_on_startup)
         
     def setup_ui(self):
         """Setup the main UI"""
@@ -2636,10 +2784,27 @@ class BridgeApp(ctk.CTk):
     # DATA FETCHING
     # ========================================================================
     
-    def start_data_fetch(self):
-        """Start fetching data in background thread"""
+    def auto_load_on_startup(self):
+        """Auto-load data on startup using smart loader"""
+        print("Auto-loading data on startup...")
+        self.smart_loader.load_on_startup(on_complete=self.on_startup_load_complete)
+    
+    def on_startup_load_complete(self, background=False):
+        """Called when startup load completes"""
+        if background:
+            print("Background refresh complete")
+            self.log("✓ WooCommerce data refreshed in background")
+        else:
+            print("Startup load complete")
+            self.log("✓ Ready to use!")
+        
+        # Update UI
+        self.after(0, lambda: self.fetch_btn.configure(state="normal", text="🔄 Refresh All Data"))
+    
+    def on_fetch_data(self):
+        """Handle fetch data button click"""
         if data_store.is_loading:
-            messagebox.showwarning("Warning", "Already fetching data...")
+            messagebox.showwarning("Warning", "Data fetch already in progress")
             return
             
         self.fetch_btn.configure(state="disabled", text="⏳ Fetching...")
@@ -2764,6 +2929,13 @@ class BridgeApp(ctk.CTk):
             data_store.unmatched_capital = unmatched_capital
             
             self.log(f"Matched: {len(matched)}, Unmatched WOO: {len(unmatched_woo)}, Unmatched Capital: {len(unmatched_capital)}")
+            
+            # Cache products to database
+            data_store.set_loading(True, 95, "Caching to database...")
+            self.log("Caching products to database...")
+            self.db.cache_woo_products(data_store.woo_products)
+            self.db.cache_capital_products(data_store.capital_products)
+            self.log("✓ Products cached to database")
             
             # Update fetch time
             data_store.last_fetch_time = datetime.now()
@@ -3231,6 +3403,14 @@ class ProductEditorDialog(ctk.CTkToplevel):
         
         ctk.CTkButton(
             btn_frame,
+            text="🗑️ Delete Product",
+            command=self.delete_product,
+            fg_color="red",
+            hover_color="darkred"
+        ).pack(side="left", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame,
             text="❌ Cancel",
             command=self.destroy,
             fg_color="gray"
@@ -3315,6 +3495,63 @@ class ProductEditorDialog(ctk.CTkToplevel):
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to update: {str(e)}")
+    
+    def delete_product(self):
+        """Delete this product from WooCommerce"""
+        from tkinter import messagebox
+        from ai_product_deletion import delete_woo_product
+        
+        product_name = self.product.get('woo_name', 'Unknown')
+        sku = self.product.get('sku', 'N/A')
+        
+        # Confirm deletion
+        confirm = messagebox.askyesno(
+            "Confirm Deletion",
+            f"Are you sure you want to DELETE this product?\n\n"
+            f"SKU: {sku}\n"
+            f"Name: {product_name}\n\n"
+            f"This action CANNOT be undone!",
+            icon='warning'
+        )
+        
+        if not confirm:
+            return
+        
+        # Double confirmation for safety
+        confirm2 = messagebox.askyesno(
+            "Final Confirmation",
+            f"FINAL WARNING: Delete {sku}?\n\n"
+            f"Click YES to permanently delete.",
+            icon='warning'
+        )
+        
+        if not confirm2:
+            return
+        
+        try:
+            # Delete from WooCommerce
+            result = delete_woo_product(
+                WOOCOMMERCE_CONFIG,
+                self.product['woo_id'],
+                force=True  # Permanent deletion
+            )
+            
+            if result['success']:
+                messagebox.showinfo("Success", f"Product {sku} deleted successfully!")
+                
+                # Remove from local cache
+                data_store.woo_products = [
+                    p for p in data_store.woo_products 
+                    if p.get('id') != self.product['woo_id']
+                ]
+                data_store.notify_data_changed()
+                
+                self.destroy()
+            else:
+                messagebox.showerror("Error", result['message'])
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete: {str(e)}")
 
 
 class PriceEditorDialog(ctk.CTkToplevel):
@@ -3586,6 +3823,14 @@ class UnmatchedWooEditorDialog(ctk.CTkToplevel):
         
         ctk.CTkButton(
             btn_frame,
+            text="🗑️ Delete Product",
+            command=self.delete_product,
+            fg_color="red",
+            hover_color="darkred"
+        ).pack(side="left", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame,
             text="❌ Cancel",
             command=self.destroy,
             fg_color="gray"
@@ -3721,6 +3966,14 @@ class UnmatchedCapitalEditorDialog(ctk.CTkToplevel):
             text="💾 Save Changes",
             command=self.save_changes,
             fg_color="green"
+        ).pack(side="left", padx=10)
+        
+        ctk.CTkButton(
+            btn_frame,
+            text="🗑️ Delete Product",
+            command=self.delete_product,
+            fg_color="red",
+            hover_color="darkred"
         ).pack(side="left", padx=10)
         
         ctk.CTkButton(

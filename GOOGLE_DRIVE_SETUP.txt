@@ -1,0 +1,59 @@
+========================================
+GOOGLE DRIVE SETUP FOR BRIDGE
+========================================
+
+Your Google Drive folder:
+https://drive.google.com/drive/folders/1HS1u0BLuJm41LFxkGWJgsCM8nmjkKAYy?usp=drive_link
+
+STEP 1: Install Google Drive Desktop
+-------------------------------------
+1. Download: https://www.google.com/drive/download/
+2. Install and sign in with your Google account
+3. Wait for initial sync to complete
+
+STEP 2: Configure BRIDGE
+-------------------------
+Option A - Automatic (Recommended):
+  BRIDGE will auto-detect Google Drive folder
+
+Option B - Manual:
+  1. Open: cloud_config.py
+  2. Find line: GOOGLE_DRIVE_FOLDER = None
+  3. Change to: GOOGLE_DRIVE_FOLDER = "C:\\Users\\YourName\\Google Drive"
+  4. Save file
+
+STEP 3: Verify Setup
+--------------------
+1. Launch BRIDGE: python bridge_app.py
+2. Check console output for: "Database: ...Google Drive..."
+3. If you see Google Drive path, you're all set!
+
+STEP 4: Access from Multiple Computers
+---------------------------------------
+1. Install Google Drive Desktop on each computer
+2. Launch BRIDGE
+3. All data syncs automatically!
+
+DATABASE LOCATION:
+------------------
+Local: bridge_data.db
+Cloud: Google Drive/BRIDGE/bridge_data.db
+
+WHAT SYNCS:
+-----------
+✓ Product matches
+✓ Conversation history
+✓ Uploaded documents (PDFs, etc.)
+✓ Price history
+✓ Update logs
+
+TROUBLESHOOTING:
+----------------
+Issue: Database not in Google Drive
+Solution: Check Google Drive is installed and synced
+
+Issue: "Permission denied"
+Solution: Check Google Drive folder permissions
+
+Issue: Two databases (local and cloud)
+Solution: Delete local bridge_data.db, restart BRIDGE
