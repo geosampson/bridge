@@ -12,9 +12,10 @@ from ai_system_knowledge import get_system_knowledge
 class BridgeAI:
     """AI assistant for BRIDGE using Claude API"""
     
-    def __init__(self):
+    def __init__(self, knowledge_base=None):
         self.config = AIConfig()
         self.client = None
+        self.knowledge_base = knowledge_base
         if self.config.is_enabled():
             self.client = anthropic.Anthropic(api_key=self.config.get_api_key())
     
@@ -288,6 +289,12 @@ Return response as JSON with insights and recommendations."""
         """Create prompt for chat interaction"""
         # Start with system knowledge
         base_prompt = get_system_knowledge()
+        
+        # Add knowledge base context if available
+        if self.knowledge_base:
+            kb_context = self.knowledge_base.get_relevant_context(message)
+            if kb_context:
+                base_prompt += kb_context
         
         base_prompt += f"\n\n{'='*80}\n"
         base_prompt += f"USER QUESTION: {message}\n"

@@ -13,10 +13,11 @@ from requests.auth import HTTPBasicAuth
 class BridgeActions:
     """Executable actions for AI assistant"""
     
-    def __init__(self, woo_config: Dict, capital_config: Dict, data_store):
+    def __init__(self, woo_config: Dict, capital_config: Dict, data_store, database=None):
         self.woo_config = woo_config
         self.capital_config = capital_config
         self.data_store = data_store
+        self.database = database
         
     # ========================================================================
     # BRAND DETECTION AND ASSIGNMENT
@@ -380,14 +381,16 @@ class BridgeActions:
         
         return potential_matches
     
-    def create_product_match(self, capital_sku: str, woo_id: int) -> Dict[str, Any]:
+    def create_product_match(self, capital_sku: str, woo_id: int, match_type='manual', confidence=None) -> Dict[str, Any]:
         """
         Create a match between Capital and WooCommerce product
-        This updates the internal data store
+        This updates WooCommerce SKU and saves match to database
         
         Args:
             capital_sku: Capital product SKU
             woo_id: WooCommerce product ID
+            match_type: Type of match (manual, auto, fuzzy)
+            confidence: Confidence score for fuzzy matches
             
         Returns:
             Result dictionary
@@ -412,13 +415,26 @@ class BridgeActions:
                     'message': 'Product not found in data store'
                 }
             
+            woo_sku = woo_product.get('sku', '')
+            
             # Update WooCommerce product SKU to match Capital
             update_result = self.update_product_sku(woo_id, capital_sku)
             
             if update_result['success']:
+                # Save match to database for persistence
+                if self.database:
+                    self.database.save_product_match(
+                        capital_sku=capital_sku,
+                        woo_id=woo_id,
+                        woo_sku=capital_sku,  # Now matches
+                        match_type=match_type,
+                        confidence=confidence,
+                        matched_by='ai' if match_type == 'auto' else 'user'
+                    )
+                
                 return {
                     'success': True,
-                    'message': f'Matched Capital SKU {capital_sku} with WooCommerce product {woo_id}'
+                    'message': f'Matched Capital SKU {capital_sku} with WooCommerce product {woo_id} (saved to database)'
                 }
             else:
                 return update_result

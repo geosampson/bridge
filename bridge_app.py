@@ -597,6 +597,43 @@ class LocalDatabase:
             )
         ''')
         
+        # Product matches (persistent matching between Capital and WooCommerce)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS product_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                capital_sku TEXT NOT NULL UNIQUE,
+                woo_id INTEGER NOT NULL,
+                woo_sku TEXT,
+                match_type TEXT DEFAULT 'manual',
+                confidence_score REAL,
+                matched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                matched_by TEXT DEFAULT 'user'
+            )
+        ''')
+        
+        # Conversation history
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                sender TEXT,
+                message TEXT,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Knowledge base documents
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                file_type TEXT,
+                content TEXT,
+                metadata TEXT,
+                upload_date TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         conn.commit()
         conn.close()
         
@@ -638,6 +675,171 @@ class LocalDatabase:
         results = cursor.fetchall()
         conn.close()
         return results
+    
+    # ========================================================================
+    # PRODUCT MATCHING METHODS
+    # ========================================================================
+    
+    def save_product_match(self, capital_sku, woo_id, woo_sku, match_type='manual', confidence=None, matched_by='user'):
+        """Save a product match to database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO product_matches 
+            (capital_sku, woo_id, woo_sku, match_type, confidence_score, matched_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (capital_sku, woo_id, woo_sku, match_type, confidence, matched_by))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_all_matches(self):
+        """Get all saved product matches"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT capital_sku, woo_id, woo_sku, match_type, confidence_score, matched_at, matched_by
+            FROM product_matches
+            ORDER BY matched_at DESC
+        ''')
+        
+        results = cursor.fetchall()
+        conn.close()
+        return results
+    
+    def delete_product_match(self, capital_sku):
+        """Delete a product match"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM product_matches WHERE capital_sku = ?', (capital_sku,))
+        
+        conn.commit()
+        conn.close()
+    
+    # ========================================================================
+    # CONVERSATION HISTORY METHODS
+    # ========================================================================
+    
+    def save_conversation(self, session_id, sender, message):
+        """Save a conversation message"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO conversations (session_id, sender, message)
+            VALUES (?, ?, ?)
+        ''', (session_id, sender, message))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_conversation_history(self, session_id, limit=20):
+        """Get recent conversation history"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT sender, message, timestamp
+            FROM conversations
+            WHERE session_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        ''', (session_id, limit))
+        
+        results = cursor.fetchall()
+        conn.close()
+        return list(reversed(results))  # Return in chronological order
+    
+    def clear_conversation_history(self, session_id=None):
+        """Clear conversation history"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        if session_id:
+            cursor.execute('DELETE FROM conversations WHERE session_id = ?', (session_id,))
+        else:
+            cursor.execute('DELETE FROM conversations')
+        
+        conn.commit()
+        conn.close()
+    
+    # ========================================================================
+    # KNOWLEDGE BASE METHODS
+    # ========================================================================
+    
+    def save_document(self, filename, file_type, content, metadata=None):
+        """Save a document to knowledge base"""
+        import json
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Delete existing document with same filename
+        cursor.execute('DELETE FROM documents WHERE filename = ?', (filename,))
+        
+        cursor.execute('''
+            INSERT INTO documents (filename, file_type, content, metadata)
+            VALUES (?, ?, ?, ?)
+        ''', (filename, file_type, content, json.dumps(metadata) if metadata else None))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_all_documents(self):
+        """Get all documents in knowledge base"""
+        import json
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, filename, file_type, content, metadata, upload_date
+            FROM documents
+            ORDER BY upload_date DESC
+        ''')
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'id': row[0],
+                'filename': row[1],
+                'file_type': row[2],
+                'content': row[3],
+                'metadata': json.loads(row[4]) if row[4] else {},
+                'upload_date': row[5]
+            })
+        
+        conn.close()
+        return results
+    
+    def search_documents(self, query):
+        """Search documents by content"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT filename, content
+            FROM documents
+            WHERE content LIKE ?
+            ORDER BY upload_date DESC
+        ''', (f'%{query}%',))
+        
+        results = cursor.fetchall()
+        conn.close()
+        return results
+    
+    def delete_document(self, filename):
+        """Delete a document from knowledge base"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM documents WHERE filename = ?', (filename,))
+        
+        conn.commit()
+        conn.close()
 
 
 # ============================================================================
@@ -658,6 +860,10 @@ class BridgeApp(ctk.CTk):
         self.woo_client = WooCommerceClient(WOOCOMMERCE_CONFIG)
         self.capital_client = CapitalClient(CAPITAL_CONFIG)
         self.db = LocalDatabase()
+        
+        # Initialize knowledge base
+        from ai_knowledge_base import KnowledgeBase
+        self.knowledge_base = KnowledgeBase(self.db)
         
         # Setup UI
         self.setup_ui()
@@ -2231,11 +2437,13 @@ class BridgeApp(ctk.CTk):
             self.tab_ai.grid_columnconfigure(0, weight=1)
             self.tab_ai.grid_rowconfigure(0, weight=1)
             
-            # Create AI chat assistant with context and action execution
+            # Create AI chat assistant with context, actions, knowledge base, and database
             self.ai_chat = AIChatAssistant(
                 self.tab_ai,
                 get_context=self.get_ai_context,
-                execute_action=self.execute_ai_action
+                execute_action=self.execute_ai_action,
+                knowledge_base=self.knowledge_base,
+                database=self.db
             )
             self.ai_chat.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
             
@@ -2357,7 +2565,8 @@ class BridgeApp(ctk.CTk):
                 self.ai_actions = BridgeActions(
                     WOOCOMMERCE_CONFIG,
                     CAPITAL_CONFIG,
-                    data_store
+                    data_store,
+                    self.db  # Pass database for persistent storage
                 )
             
             # Execute based on action type
@@ -2395,6 +2604,20 @@ class BridgeApp(ctk.CTk):
                 woo_id = action_data.get('woo_id')
                 result = self.ai_actions.create_product_match(capital_sku, woo_id)
                 return result.get('message', 'Unknown result')
+            
+            elif action_type == 'delete_product':
+                from ai_product_deletion import delete_woo_product
+                woo_id = action_data.get('woo_id')
+                force = action_data.get('force', True)
+                result = delete_woo_product(WOOCOMMERCE_CONFIG, woo_id, force)
+                return result.get('message', 'Unknown result')
+            
+            elif action_type == 'bulk_delete_products':
+                from ai_product_deletion import bulk_delete_products
+                woo_ids = action_data.get('woo_ids', [])
+                force = action_data.get('force', True)
+                result = bulk_delete_products(WOOCOMMERCE_CONFIG, woo_ids, force)
+                return f"Deleted {result['success']} products, {result['failed']} failed"
             
             else:
                 return f"Unknown action type: {action_type}"
@@ -2882,18 +3105,33 @@ class BridgeApp(ctk.CTk):
         PriceEditorDialog(self, product, self.woo_client, self.db)
         
     def sync_prices_from_capital(self):
-        """Quick action to sync prices from Capital"""
+        """Quick action to sync prices from Capital while maintaining discount percentages"""
         mismatches = [p for p in data_store.matched_products if not p.get('price_match')]
         
         if not mismatches:
             messagebox.showinfo("Info", "All prices are already synchronized!")
             return
             
-        if messagebox.askyesno("Confirm", f"Update {len(mismatches)} products to Capital prices?"):
-            updates = [{
-                "id": p['woo_id'],
-                "regular_price": str(p['capital_rtlprice'])
-            } for p in mismatches]
+        if messagebox.askyesno("Confirm", f"Update {len(mismatches)} products to Capital prices?\n\nNote: Discount percentages will be maintained."):
+            updates = []
+            for p in mismatches:
+                update_data = {
+                    "id": p['woo_id'],
+                    "regular_price": str(p['capital_rtlprice'])
+                }
+                
+                # Maintain discount percentage if product has a sale price
+                woo_regular = float(p.get('woo_regular_price', 0))
+                woo_sale = float(p.get('woo_sale_price', 0)) if p.get('woo_sale_price') else 0
+                
+                if woo_regular > 0 and woo_sale > 0:
+                    # Calculate current discount percentage
+                    discount_pct = ((woo_regular - woo_sale) / woo_regular) * 100
+                    # Apply same discount to new Capital price
+                    new_sale = float(p['capital_rtlprice']) * (1 - discount_pct / 100)
+                    update_data['sale_price'] = f"{new_sale:.2f}"
+                
+                updates.append(update_data)
             
             threading.Thread(target=self.batch_update_prices, args=(updates,)).start()
 
@@ -3132,16 +3370,36 @@ class PriceEditorDialog(ctk.CTkToplevel):
         entry_frame = ctk.CTkFrame(self)
         entry_frame.pack(fill="x", padx=20, pady=10)
         
+        # Calculate current discount percentage
+        current_regular = float(self.product.get('woo_regular_price', 0))
+        current_sale = float(self.product.get('woo_sale_price', 0)) if self.product.get('woo_sale_price') else 0
+        self.current_discount_pct = 0
+        if current_regular > 0 and current_sale > 0:
+            self.current_discount_pct = ((current_regular - current_sale) / current_regular) * 100
+        
         ctk.CTkLabel(entry_frame, text="New Regular Price (€):").pack(pady=5)
         self.price_entry = ctk.CTkEntry(entry_frame, width=150)
         self.price_entry.pack(pady=5)
         self.price_entry.insert(0, str(self.product.get('capital_rtlprice', '')))
+        # Bind to auto-calculate sale price when regular price changes
+        self.price_entry.bind('<KeyRelease>', self.update_sale_price_from_discount)
+        
+        # Show current discount
+        self.discount_label = ctk.CTkLabel(
+            entry_frame, 
+            text=f"Current Discount: {self.current_discount_pct:.1f}%" if self.current_discount_pct > 0 else "No discount",
+            font=ctk.CTkFont(size=12),
+            text_color="orange"
+        )
+        self.discount_label.pack(pady=5)
         
         ctk.CTkLabel(entry_frame, text="New Sale Price (€):").pack(pady=5)
         self.sale_entry = ctk.CTkEntry(entry_frame, width=150)
         self.sale_entry.pack(pady=5)
         if self.product.get('woo_sale_price'):
             self.sale_entry.insert(0, str(self.product.get('woo_sale_price', '')))
+        # Bind to update discount when sale price changes manually
+        self.sale_entry.bind('<KeyRelease>', self.update_discount_from_sale_price)
             
         # Quick buttons
         quick_frame = ctk.CTkFrame(self)
@@ -3177,10 +3435,39 @@ class PriceEditorDialog(ctk.CTkToplevel):
             fg_color="gray"
         ).pack(side="right", padx=10)
         
+    def update_sale_price_from_discount(self, event=None):
+        """Auto-calculate sale price to maintain discount percentage"""
+        try:
+            new_regular = float(self.price_entry.get().strip())
+            if self.current_discount_pct > 0 and new_regular > 0:
+                # Calculate new sale price maintaining discount %
+                new_sale = new_regular * (1 - self.current_discount_pct / 100)
+                self.sale_entry.delete(0, "end")
+                self.sale_entry.insert(0, f"{new_sale:.2f}")
+        except ValueError:
+            pass  # Invalid number, ignore
+    
+    def update_discount_from_sale_price(self, event=None):
+        """Update discount label when sale price is manually changed"""
+        try:
+            regular = float(self.price_entry.get().strip())
+            sale = float(self.sale_entry.get().strip()) if self.sale_entry.get().strip() else 0
+            if regular > 0 and sale > 0:
+                discount_pct = ((regular - sale) / regular) * 100
+                self.current_discount_pct = discount_pct
+                self.discount_label.configure(text=f"Current Discount: {discount_pct:.1f}%")
+            elif sale == 0:
+                self.current_discount_pct = 0
+                self.discount_label.configure(text="No discount")
+        except ValueError:
+            pass  # Invalid number, ignore
+    
     def use_capital_price(self):
         """Set price to Capital price"""
         self.price_entry.delete(0, "end")
         self.price_entry.insert(0, str(self.product.get('capital_rtlprice', '')))
+        # Trigger sale price recalculation
+        self.update_sale_price_from_discount()
         
     def save_price(self):
         """Save price changes"""

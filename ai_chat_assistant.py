@@ -7,18 +7,27 @@ import customtkinter as ctk
 from typing import Dict, Any
 from ai_client import BridgeAI
 import threading
+import os
+import time
 
 class AIChatAssistant(ctk.CTkFrame):
     """Chat interface for AI assistant"""
     
-    def __init__(self, parent, get_context: callable = None, execute_action: callable = None):
+    def __init__(self, parent, get_context: callable = None, execute_action: callable = None, knowledge_base=None, database=None):
         super().__init__(parent)
         
-        self.ai = BridgeAI()
+        self.ai = BridgeAI(knowledge_base=knowledge_base)
         self.get_context = get_context  # Function to get current app context
         self.execute_action = execute_action  # Function to execute approved actions
+        self.knowledge_base = knowledge_base
+        self.database = database
+        self.session_id = f"session_{int(time.time())}"
         self.chat_history = []
         self.pending_actions = []  # Store suggested actions awaiting approval
+        
+        # Load conversation history from database
+        if self.database:
+            self._load_history()
         
         self.setup_ui()
     
@@ -41,6 +50,13 @@ class AIChatAssistant(ctk.CTkFrame):
             text_color="green" if self.ai.is_available() else "red"
         )
         self.status_label.pack(side="left", padx=20)
+        
+        ctk.CTkButton(
+            header,
+            text="📄 Upload Doc",
+            command=self.upload_document,
+            width=120
+        ).pack(side="right", padx=5)
         
         ctk.CTkButton(
             header,
@@ -169,8 +185,11 @@ class AIChatAssistant(ctk.CTkFrame):
             self.after(0, lambda: self.send_button.configure(state="normal"))
     
     def _add_message(self, sender: str, message: str):
-        """Add a message to the chat display"""
+        """Add a message to chat display"""
         self.chat_history.append({"sender": sender, "message": message})
+        
+        # Save to database
+        self._save_message(sender, message)
         
         # Enable editing
         self.chat_display.configure(state="normal")
@@ -197,6 +216,61 @@ class AIChatAssistant(ctk.CTkFrame):
         # Scroll to bottom
         self.chat_display.see("end")
     
+    def upload_document(self):
+        """Upload a document to knowledge base"""
+        if not self.knowledge_base:
+            self._add_message("System", "Knowledge base not available")
+            return
+        
+        from tkinter import filedialog
+        
+        filepath = filedialog.askopenfilename(
+            title="Select Document",
+            filetypes=[
+                ("PDF files", "*.pdf"),
+                ("Word documents", "*.docx *.doc"),
+                ("Text files", "*.txt *.md"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if filepath:
+            self._add_message("System", f"Uploading {os.path.basename(filepath)}...")
+            
+            # Upload in thread to avoid blocking UI
+            def upload():
+                result = self.knowledge_base.upload_file(filepath)
+                if result['success']:
+                    self._add_message("AI", f"✓ {result['message']}. I can now reference this document when answering questions.")
+                else:
+                    self._add_message("System", f"✗ {result['message']}")
+            
+            threading.Thread(target=upload, daemon=True).start()
+    
+    def _load_history(self):
+        """Load conversation history from database"""
+        if not self.database:
+            return
+        
+        history = self.database.get_conversation_history(self.session_id, limit=50)
+        for sender, message, timestamp in history:
+            self.chat_history.append({"sender": sender, "message": message})
+            # Display in UI
+            self.chat_display.configure(state="normal")
+            if sender == "user":
+                self.chat_display.insert("end", f"\nYou: ", "user")
+            elif sender == "ai":
+                self.chat_display.insert("end", f"\nAI: ", "ai")
+            else:
+                self.chat_display.insert("end", f"\n{sender}: ", "system")
+            self.chat_display.insert("end", f"{message}\n")
+            self.chat_display.configure(state="disabled")
+    
+    def _save_message(self, sender: str, message: str):
+        """Save message to database"""
+        if self.database:
+            self.database.save_conversation(self.session_id, sender.lower(), message)
+    
     def clear_chat(self):
         """Clear chat history"""
         self.chat_history = []
@@ -204,6 +278,10 @@ class AIChatAssistant(ctk.CTkFrame):
         self.chat_display.configure(state="normal")
         self.chat_display.delete("1.0", "end")
         self.chat_display.configure(state="disabled")
+        
+        # Clear from database
+        if self.database:
+            self.database.clear_conversation_history(self.session_id)
         
         if self.ai.is_available():
             self._add_message("AI", "Chat cleared. How can I help you?")
