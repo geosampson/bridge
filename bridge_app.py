@@ -2962,9 +2962,10 @@ class BridgeApp(ctk.CTk):
             data_store.notify_data_changed()
             
         except Exception as e:
-            data_store.set_loading(False, 0, f"Error: {str(e)}")
-            self.log(f"Error fetching data: {str(e)}")
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            error_msg = str(e)
+            data_store.set_loading(False, 0, f"Error: {error_msg}")
+            self.log(f"Error fetching data: {error_msg}")
+            self.after(0, lambda msg=error_msg: messagebox.showerror("Error", msg))
             
         finally:
             self.after(0, lambda: self.fetch_btn.configure(state="normal", text="📥 Fetch All Data"))
