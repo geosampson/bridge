@@ -19,9 +19,16 @@ def get_google_drive_path():
     if system == "Windows":
         # Common Google Drive paths on Windows
         possible_paths = [
+            # Google Drive Desktop (virtual drive - most common)
+            "G:\\My Drive",
+            "H:\\My Drive",
+            "I:\\My Drive",
+            # Traditional Google Drive folder
             f"C:\\Users\\{username}\\Google Drive",
             f"C:\\Users\\{username}\\GoogleDrive",
             os.path.expanduser("~/Google Drive"),
+            # OneDrive (in case user is syncing there)
+            f"C:\\Users\\{username}\\OneDrive\\Υπολογιστής\\bridge",
         ]
     elif system == "Darwin":  # macOS
         possible_paths = [
