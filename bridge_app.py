@@ -190,6 +190,13 @@ data_store = DataStore()
 class WooCommerceClient:
     """WooCommerce REST API client"""
     
+    def create_product(self, product_data):
+        """Create a new product in WooCommerce"""
+        url = f"{self.store_url}/wp-json/wc/v3/products"
+        response = requests.post(url, json=product_data, auth=self.auth, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    
     def __init__(self, config):
         self.store_url = config["store_url"]
         self.auth = HTTPBasicAuth(config["consumer_key"], config["consumer_secret"])
@@ -440,9 +447,15 @@ class CapitalClient:
 # ============================================================================
 # PRODUCT MATCHER
 # ============================================================================
-
 class ProductMatcher:
-    """Matches products between WooCommerce and Capital ERP"""
+    """Match products between WooCommerce and Capital"""
+    
+    # Import price rules
+    try:
+        from price_rules import PriceRules
+        price_rules = PriceRules()
+    except ImportError:
+        price_rules = None ERP"""
     
     @staticmethod
     def match_products(woo_products, capital_products):
@@ -528,9 +541,25 @@ class ProductMatcher:
                     'capital_discount': float(cap_product.get('DISCOUNT') or 0),
                     'capital_maxdiscount': float(cap_product.get('MAXDISCOUNT') or 0),
                     'capital_stock': float(cap_product.get('BALANCEQTY') or 0),
-                    
-                    'price_match': abs(regular_price - float(cap_product.get('RTLPRICE') or 0)) < 0.01,
                 }
+                
+                # Check price match using price rules
+                capital_price = float(cap_product.get('RTLPRICE') or 0)
+                product_name = woo_product.get('name', '')
+                
+                if ProductMatcher.price_rules:
+                    price_check = ProductMatcher.price_rules.check_price_match(
+                        regular_price, capital_price, product_name
+                    )
+                    matched_product['price_match'] = price_check['matches']
+                    matched_product['price_rule_applied'] = price_check['rule_applied']
+                    matched_product['expected_price'] = price_check['expected_price']
+                    matched_product['price_difference'] = price_check['difference']
+                    matched_product['price_difference_percent'] = price_check['difference_percent']
+                else:
+                    # Fallback to simple comparison
+                    matched_product['price_match'] = abs(regular_price - capital_price) < 0.01
+                    matched_product['price_rule_applied'] = None
                 
                 matched.append(matched_product)
                 
@@ -2293,12 +2322,27 @@ class BridgeApp(ctk.CTk):
         # Double-click to edit
         self.unmatched_capital_tree.bind("<Double-1>", self.on_unmatched_capital_double_click)
         
+        # Buttons frame
+        buttons_frame = ctk.CTkFrame(self.tab_unmatched)
+        buttons_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        
         # Match button
         ctk.CTkButton(
-            self.tab_unmatched,
+            buttons_frame,
             text="🔗 Match Selected Products",
-            command=self.match_selected_products
-        ).grid(row=3, column=0, columnspan=2, pady=10)
+            command=self.match_selected_products,
+            width=200
+        ).pack(side="left", padx=5)
+        
+        # Create new product button
+        ctk.CTkButton(
+            buttons_frame,
+            text="➕ Create New Product",
+            command=self.create_new_product_from_capital,
+            fg_color="green",
+            hover_color="darkgreen",
+            width=200
+        ).pack(side="left", padx=5)
         
     def filter_unmatched_products(self):
         """Filter unmatched products based on search criteria"""
@@ -2370,6 +2414,32 @@ class BridgeApp(ctk.CTk):
     def open_unmatched_capital_editor(self, product):
         """Open editor dialog for unmatched Capital product"""
         UnmatchedCapitalEditorDialog(self, product, self.db)
+    
+    def create_new_product_from_capital(self):
+        """Create new WooCommerce product from selected Capital product"""
+        selection = self.unmatched_capital_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a Capital product to create")
+            return
+        
+        # Get selected Capital product
+        item = self.unmatched_capital_tree.item(selection[0], "values")
+        capital_code = item[0]
+        
+        # Find full product data
+        capital_product = None
+        for product in data_store.unmatched_capital:
+            if product.get('CODE', '') == capital_code:
+                capital_product = product
+                break
+        
+        if not capital_product:
+            messagebox.showerror("Error", "Could not find Capital product data")
+            return
+        
+        # Open new product dialog
+        from new_product_dialog import NewProductDialog
+        NewProductDialog(self, capital_product, self.woo_client, self.db)
         
     def match_selected_products(self):
         """Match selected products manually"""
@@ -2456,6 +2526,16 @@ class BridgeApp(ctk.CTk):
             # Add to matched products
             data_store.matched_products.append(matched_product)
             
+            # Save match to database
+            self.db.save_match(
+                capital_sku=capital_code,
+                woo_id=woo_product['id'],
+                woo_sku=woo_sku,
+                match_type='manual',
+                confidence=100.0,
+                matched_by='user'
+            )
+            
             # Remove from unmatched lists
             data_store.unmatched_woo = [p for p in data_store.unmatched_woo if p.get('sku', '') != woo_sku]
             data_store.unmatched_capital = [p for p in data_store.unmatched_capital if p.get('CODE', '') != capital_code]
@@ -2463,8 +2543,8 @@ class BridgeApp(ctk.CTk):
             # Refresh UI
             data_store.notify_data_changed()
             
-            self.log(f"Manually matched: WOO SKU {woo_sku} <-> Capital CODE {capital_code}")
-            messagebox.showinfo("Success", f"Successfully matched products!\n\nSKU: {woo_sku}\nCODE: {capital_code}\n\nThe matched product now appears in Products and Prices tabs.")
+            self.log(f"Manually matched: WOO SKU {woo_sku} <-> Capital CODE {capital_code} (saved to database)")
+            messagebox.showinfo("Success", f"Successfully matched products!\n\nSKU: {woo_sku}\nCODE: {capital_code}\n\nThe match has been saved and will persist across sessions.\n\nThe matched product now appears in Products and Prices tabs.")
             
         except Exception as e:
             self.log(f"Error in manual matching: {str(e)}")
