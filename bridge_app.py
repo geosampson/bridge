@@ -450,12 +450,15 @@ class CapitalClient:
 class ProductMatcher:
     """Match products between WooCommerce and Capital"""
     
-    # Import price rules
+    # Import price rules and ratio manager
     try:
         from price_rules import PriceRules
+        from price_ratio_manager import PriceRatioManager, check_price_with_manual_ratio
         price_rules = PriceRules()
+        ratio_manager = PriceRatioManager()
     except ImportError:
-        price_rules = None ERP"""
+        price_rules = None
+        ratio_manager = None
     
     @staticmethod
     def match_products(woo_products, capital_products):
@@ -543,11 +546,22 @@ class ProductMatcher:
                     'capital_stock': float(cap_product.get('BALANCEQTY') or 0),
                 }
                 
-                # Check price match using price rules
+                # Check price match using manual ratio first, then price rules
                 capital_price = float(cap_product.get('RTLPRICE') or 0)
                 product_name = woo_product.get('name', '')
                 
-                if ProductMatcher.price_rules:
+                # Check if manual ratio exists for this SKU
+                if ProductMatcher.ratio_manager and ProductMatcher.ratio_manager.has_ratio(sku):
+                    price_check = check_price_with_manual_ratio(
+                        regular_price, capital_price, sku, ProductMatcher.ratio_manager
+                    )
+                    matched_product['price_match'] = price_check['matches']
+                    matched_product['price_rule_applied'] = price_check['rule_applied']
+                    matched_product['expected_price'] = price_check['expected_price']
+                    matched_product['price_difference'] = price_check['difference']
+                    matched_product['price_difference_percent'] = price_check['difference_percent']
+                    matched_product['manual_ratio'] = price_check['ratio']
+                elif ProductMatcher.price_rules:
                     price_check = ProductMatcher.price_rules.check_price_match(
                         regular_price, capital_price, product_name
                     )
@@ -556,6 +570,7 @@ class ProductMatcher:
                     matched_product['expected_price'] = price_check['expected_price']
                     matched_product['price_difference'] = price_check['difference']
                     matched_product['price_difference_percent'] = price_check['difference_percent']
+                    matched_product['requires_manual_ratio'] = price_check.get('requires_manual_ratio', False)
                 else:
                     # Fallback to simple comparison
                     matched_product['price_match'] = abs(regular_price - capital_price) < 0.01
@@ -2208,6 +2223,10 @@ class BridgeApp(ctk.CTk):
             # Refresh both Products and Prices tables
             self.after(0, self.refresh_products_table)
             self.after(0, self.refresh_prices_table)
+            
+            # Refresh overview metrics
+            self.after(0, self.update_overview_metrics)
+            
             self.after(100, lambda: messagebox.showinfo("Success", f"Successfully updated {len(updates)} products!"))
             
         except Exception as e:
@@ -2620,28 +2639,28 @@ class BridgeApp(ctk.CTk):
         details = f"""
 === Product Details for {sku} ===
 
-📦 Product Name: {product.get('woo_name', 'N/A')}
-🏷️ SKU: {product.get('sku', 'N/A')}
+Product Name: {product.get('woo_name', 'N/A')}
+SKU: {product.get('sku', 'N/A')}
 
-💰 Pricing:
+Pricing:
   - WooCommerce Regular Price: €{product.get('woo_regular_price', 0):.2f}
   - WooCommerce Sale Price: €{product.get('woo_sale_price', 0):.2f}
   - Capital RTLPRICE: €{product.get('capital_rtlprice', 0):.2f}
   - Discount: {product.get('woo_discount_percent', 0):.1f}%
 
-📊 Sales:
+Sales:
   - Total Sales: {product.get('woo_total_sales', 0)} units
 
-📦 Stock:
+Stock:
   - Stock Status: {product.get('woo_stock_status', 'N/A')}
   - Stock Quantity: {product.get('woo_stock_quantity', 'N/A')}
   - Capital TRMODE: {product.get('capital_trmode', 'N/A')}
 
-📁 Categories: {', '.join(product.get('woo_categories', []))}
+Categories: {', '.join(product.get('woo_categories', []))}
 
-🔗 Link: {product.get('woo_permalink', 'N/A')}
+Link: {product.get('woo_permalink', 'N/A')}
 
-📅 Dates:
+Dates:
   - Created: {product.get('woo_date_created', 'N/A')}
   - Modified: {product.get('woo_date_modified', 'N/A')}
 """

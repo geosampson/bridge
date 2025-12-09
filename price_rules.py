@@ -28,6 +28,12 @@ class PriceRules:
                 'tolerance_percent': 5,  # Allow 5% price difference
                 'description': 'Products where Capital price is per KG but WooCommerce is per package'
             },
+            'piece_based': {
+                'enabled': True,
+                'keywords': ['ΗΛΕΚΤΡΟΔΙΟ', 'ΗΛΕΚΤΡΟΔΙΑ', 'ΒΕΡΓΑ', 'ELECTRODE', 'ELECTRODES', 'RODS'],  # Products sold by piece
+                'tolerance_percent': 5,
+                'description': 'Products where Capital price is per KG but WooCommerce is per piece/package'
+            },
             'length_based': {
                 'enabled': True,
                 'keywords': ['ΚΑΛΩΔΙΟ', 'ΣΩΛΗΝΑΣ', 'CABLE', 'PIPE', 'TUBE'],  # Products sold by length
@@ -144,6 +150,16 @@ class PriceRules:
         
         return any(keyword in product_upper for keyword in keywords)
     
+    def should_use_piece_rule(self, product_name):
+        """Check if product should use piece-based pricing rule"""
+        if not self.rules['piece_based']['enabled']:
+            return False
+        
+        product_upper = product_name.upper()
+        keywords = self.rules['piece_based']['keywords']
+        
+        return any(keyword in product_upper for keyword in keywords)
+    
     def calculate_expected_price(self, capital_price_per_unit, product_name, rule_type='weight'):
         """
         Calculate expected WooCommerce price based on Capital price per unit.
@@ -221,6 +237,19 @@ class PriceRules:
                 result['within_tolerance'] = result['difference_percent'] <= tolerance
                 result['matches'] = result['within_tolerance']
                 return result
+        
+        # Check if piece-based rule applies (manual override required)
+        if self.should_use_piece_rule(product_name):
+            # For piece-based products, we can't auto-calculate
+            # User needs to set manual price ratio
+            result['rule_applied'] = 'piece_based_manual'
+            result['expected_price'] = None  # Requires manual ratio
+            result['difference'] = abs(woo_price - capital_price)
+            result['difference_percent'] = (result['difference'] / capital_price * 100) if capital_price > 0 else 0
+            result['within_tolerance'] = False  # Always false until manual ratio set
+            result['matches'] = False
+            result['requires_manual_ratio'] = True
+            return result
         
         # No special rule applies - use direct comparison
         result['expected_price'] = capital_price

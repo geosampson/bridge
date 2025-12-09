@@ -262,7 +262,9 @@ class NewProductDialog(ctk.CTkToplevel):
                 'sku': sku,
                 'regular_price': str(regular_price),
                 'status': status,
-                'manage_stock': True if stock_quantity is not None else False,
+                # Hide stock from customers but track internally
+                'manage_stock': False,  # Don't show stock to customers
+                'stock_status': 'instock',  # Always show as in stock
             }
             
             if sale_price is not None:
