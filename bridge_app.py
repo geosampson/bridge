@@ -654,7 +654,8 @@ class LocalDatabase:
         # Capital products cache  
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS capital_products_cache (
-                sku TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT,
                 name TEXT,
                 rtlprice REAL,
                 stock INTEGER,
@@ -933,25 +934,35 @@ class LocalDatabase:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Clear old cache
-        cursor.execute('DELETE FROM capital_products_cache')
-        
-        # Insert new cache
-        for product in products:
-            cursor.execute('''
-                INSERT INTO capital_products_cache 
-                (sku, name, rtlprice, stock, product_data)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (
-                product.get('sku', ''),
-                product.get('name', ''),
-                float(product.get('rtlprice', 0)) if product.get('rtlprice') else 0,
-                int(product.get('stock', 0)) if product.get('stock') else 0,
-                json.dumps(product)
-            ))
-        
-        conn.commit()
-        conn.close()
+        try:
+            # Clear old cache
+            cursor.execute('DELETE FROM capital_products_cache')
+            
+            # Insert new cache
+            for product in products:
+                try:
+                    cursor.execute('''
+                        INSERT INTO capital_products_cache 
+                        (sku, name, rtlprice, stock, product_data)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (
+                        product.get('sku', ''),
+                        product.get('name', ''),
+                        float(product.get('rtlprice', 0)) if product.get('rtlprice') else 0,
+                        int(product.get('stock', 0)) if product.get('stock') else 0,
+                        json.dumps(product)
+                    ))
+                except Exception as e:
+                    # Skip products that cause errors (e.g., duplicate SKUs)
+                    print(f"Warning: Skipped caching product {product.get('sku', 'unknown')}: {e}")
+                    continue
+            
+            conn.commit()
+        except Exception as e:
+            print(f"Error caching Capital products: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
     
     def get_cached_capital_products(self):
         """Get cached Capital products"""
