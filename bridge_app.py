@@ -3127,20 +3127,30 @@ Dates:
     def refresh_capital_prices_for_checked_prices_tab(self):
         """Refresh Capital prices for checked products in Prices tab"""
         checked_items = [item_id for item_id, checked in self.price_checkboxes.items() if checked]
-        
+
         if not checked_items:
             messagebox.showwarning("Warning", "Please check products to refresh")
             return
-        
+
         # Get SKUs of checked products
         skus = []
         for item in checked_items:
             values = self.prices_tree.item(item, "values")
             sku = values[1]  # SKU is in column 1
             skus.append(sku)
-        
+
         self.log(f"Refreshing Capital prices for {len(skus)} products...")
         threading.Thread(target=self.refresh_capital_prices_background, args=(skus,), daemon=True).start()
+
+    def update_capital_prices(self, *args, **kwargs):
+        """Legacy alias for refreshing Capital prices.
+
+        Older menu bindings and dialogs (e.g., SetDiscount) may still invoke
+        ``update_capital_prices``. Keep a backwards-compatible wrapper that
+        delegates to the current refresh handler to avoid AttributeError while
+        leaving the updated logic in ``refresh_capital_prices_for_checked``.
+        """
+        return self.refresh_capital_prices_for_checked(*args, **kwargs)
     
     def refresh_woo_prices_for_checked_prices_tab(self):
         """Refresh WooCommerce prices for checked products in Prices tab"""
