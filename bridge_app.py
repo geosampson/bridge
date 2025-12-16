@@ -2911,10 +2911,19 @@ Dates:
         else:
             print("Startup load complete")
             self.log("✓ Ready to use!")
-        
+
         # Update UI
         self.after(0, lambda: self.fetch_btn.configure(state="normal", text="🔄 Refresh All Data"))
-    
+
+    def start_data_fetch(self):
+        """Legacy alias for starting a full data fetch.
+
+        Some environments may still call this older callback name (e.g., from
+        saved tkinter menu bindings). Preserve compatibility by delegating to
+        the current handler instead of raising an AttributeError.
+        """
+        return self.on_fetch_data()
+
     def on_fetch_data(self):
         """Handle fetch data button click"""
         if data_store.is_loading:
