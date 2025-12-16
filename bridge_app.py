@@ -17,7 +17,7 @@ Author: Roussakis Supplies IKE
 """
 
 import customtkinter as ctk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import requests
 from requests.auth import HTTPBasicAuth
 import urllib3
@@ -196,6 +196,26 @@ class WooCommerceClient:
         response = requests.post(url, json=product_data, auth=self.auth, timeout=30)
         response.raise_for_status()
         return response.json()
+
+    def get_product(self, product_id):
+        """Fetch a single WooCommerce product by ID"""
+        url = f"{self.store_url}/wp-json/wc/v3/products/{product_id}"
+        response = requests.get(url, auth=self.auth, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def upload_media(self, file_path):
+        """Upload a media file to WooCommerce/WordPress and return the attachment info"""
+        filename = os.path.basename(file_path)
+        url = f"{self.store_url}/wp-json/wp/v2/media"
+
+        with open(file_path, "rb") as f:
+            headers = {
+                "Content-Disposition": f"attachment; filename={filename}",
+            }
+            response = requests.post(url, auth=self.auth, headers=headers, files={"file": f}, timeout=60)
+            response.raise_for_status()
+            return response.json()
     
     def __init__(self, config):
         self.store_url = config["store_url"]
@@ -442,6 +462,31 @@ class CapitalClient:
             return data
         else:
             raise Exception(f"Failed to get Capital products: {result.get('message', 'Unknown error')}")
+
+    def get_invoice_items(self, invoice_number):
+        """Fetch invoice line items from Capital ERP for creating WooCommerce products"""
+        if not self.session_id:
+            self.login()
+
+        request_data = {
+            "service": "getdata",
+            "sessionid": self.session_id,
+            "action": "read",
+            # Invoice lines are returned through MTRLINES while we filter by the parent sales document
+            "tablename": "MTRLINES",
+            "fields": "CODE;MTRL;MTRL_TEXT;MTRL_DESCR;QTY;PRICE;LINEVAL;FINDOC",
+            "filters": f"FINDOC:EQ:{invoice_number}"
+        }
+
+        response = self.session.post(self.base_url, json=request_data, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+
+        if not result.get("success"):
+            raise Exception(f"Failed to fetch invoice {invoice_number}: {result.get('message', 'Unknown error')}")
+
+        data = result.get("data") or result.get("MTRLINES") or result.get("rows") or []
+        return data
 
 
 # ============================================================================
@@ -1158,6 +1203,7 @@ class BridgeApp(ctk.CTk):
         self.tab_overview = self.tabview.add("📊 Overview")
         self.tab_products = self.tabview.add("📦 Products")
         self.tab_prices = self.tabview.add("💰 Prices & Discounts")
+        self.tab_invoice = self.tabview.add("🧾 Invoice Import")
         self.tab_unmatched = self.tabview.add("🔗 Unmatched")
         self.tab_analytics = self.tabview.add("📈 Analytics")
         self.tab_logs = self.tabview.add("📋 Logs")
@@ -1167,6 +1213,7 @@ class BridgeApp(ctk.CTk):
         self.setup_overview_tab()
         self.setup_products_tab()
         self.setup_prices_tab()
+        self.setup_invoice_tab()
         self.setup_unmatched_tab()
         self.setup_analytics_tab()
         self.setup_logs_tab()
@@ -2223,17 +2270,306 @@ class BridgeApp(ctk.CTk):
             # Refresh both Products and Prices tables
             self.after(0, self.refresh_products_table)
             self.after(0, self.refresh_prices_table)
-            
+
             # Refresh overview metrics
             self.after(0, self.update_overview_metrics)
-            
+
             self.after(100, lambda: messagebox.showinfo("Success", f"Successfully updated {len(updates)} products!"))
-            
+
         except Exception as e:
             data_store.set_loading(False, 0, "Update failed")
             self.after(0, lambda: messagebox.showerror("Error", f"Failed to update prices: {str(e)}"))
             print(f"Batch update error: {e}")
-            
+
+    # ========================================================================
+    # INVOICE IMPORT TAB
+    # ========================================================================
+
+    def setup_invoice_tab(self):
+        """Setup tab for creating products from Capital invoices"""
+        self.tab_invoice.grid_columnconfigure(0, weight=1)
+        self.tab_invoice.grid_rowconfigure(1, weight=1)
+
+        self.invoice_items = []
+        self.invoice_checkboxes = {}
+        self.invoice_shared_file = None
+
+        # Controls
+        controls = ctk.CTkFrame(self.tab_invoice)
+        controls.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        controls.grid_columnconfigure(4, weight=1)
+
+        ctk.CTkLabel(controls, text="Invoice Number:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.invoice_number_entry = ctk.CTkEntry(controls, width=160)
+        self.invoice_number_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+        ctk.CTkButton(
+            controls,
+            text="🔎 Fetch Products",
+            command=self.fetch_invoice_products,
+            width=150
+        ).grid(row=0, column=2, padx=5, pady=5)
+
+        self.invoice_status = ctk.CTkLabel(controls, text="Enter an invoice number to begin", text_color="gray")
+        self.invoice_status.grid(row=0, column=3, padx=10, pady=5, sticky="w")
+
+        # Tree
+        tree_frame = ctk.CTkFrame(self.tab_invoice)
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+
+        invoice_columns = ("☑", "Code", "Description", "Qty", "Unit Price", "Line Total")
+        self.invoice_tree = ttk.Treeview(tree_frame, columns=invoice_columns, show="headings")
+        self.invoice_tree.heading("☑", text="☑", command=self.toggle_all_invoice_items)
+        self.invoice_tree.heading("Code", text="Code")
+        self.invoice_tree.heading("Description", text="Description")
+        self.invoice_tree.heading("Qty", text="Qty")
+        self.invoice_tree.heading("Unit Price", text="Unit Price")
+        self.invoice_tree.heading("Line Total", text="Line Total")
+
+        self.invoice_tree.column("☑", width=40, anchor="center")
+        self.invoice_tree.column("Code", width=120)
+        self.invoice_tree.column("Description", width=320)
+        self.invoice_tree.column("Qty", width=80, anchor="center")
+        self.invoice_tree.column("Unit Price", width=100, anchor="e")
+        self.invoice_tree.column("Line Total", width=120, anchor="e")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.invoice_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.invoice_tree.xview)
+        self.invoice_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.invoice_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        self.invoice_tree.bind("<Button-1>", self.on_invoice_click)
+
+        # Actions
+        actions = ctk.CTkFrame(self.tab_invoice)
+        actions.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
+
+        ctk.CTkButton(
+            actions,
+            text="➕ Create Selected Products",
+            command=self.create_selected_invoice_products,
+            fg_color="green"
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            actions,
+            text="📂 Pick Shared File",
+            command=self.pick_invoice_shared_file
+        ).pack(side="left", padx=5)
+
+        self.invoice_file_label = ctk.CTkLabel(actions, text="No file selected", text_color="gray")
+        self.invoice_file_label.pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            actions,
+            text="📝 Append Note/File to Selected Woo Products",
+            command=self.append_group_note_to_products,
+            fg_color="blue"
+        ).pack(side="right", padx=5)
+
+        self.group_note_text = ctk.CTkTextbox(self.tab_invoice, height=120, width=400)
+        self.group_note_text.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
+        self.group_note_text.insert("1.0", "Enter note to append to product descriptions (optional)")
+
+    def fetch_invoice_products(self):
+        """Fetch invoice items from Capital and populate tree"""
+        invoice_number = self.invoice_number_entry.get().strip()
+        if not invoice_number:
+            messagebox.showwarning("Missing invoice", "Please enter an invoice number")
+            return
+
+        self.invoice_status.configure(text="Fetching invoice items...", text_color="orange")
+
+        def worker():
+            try:
+                items = self.capital_client.get_invoice_items(invoice_number)
+                self.invoice_items = items or []
+                self.after(0, self.populate_invoice_tree)
+                self.after(0, lambda: self.invoice_status.configure(
+                    text=f"Loaded {len(self.invoice_items)} items from invoice {invoice_number}",
+                    text_color="green"
+                ))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Error", f"Failed to fetch invoice: {e}"))
+                self.after(0, lambda: self.invoice_status.configure(text="Error fetching invoice", text_color="red"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def populate_invoice_tree(self):
+        """Populate invoice tree with fetched items"""
+        for item in self.invoice_tree.get_children():
+            self.invoice_tree.delete(item)
+        self.invoice_checkboxes.clear()
+
+        for item in self.invoice_items:
+            code = str(item.get('CODE') or item.get('MTRL') or '').strip()
+            descr = item.get('MTRL_DESCR') or item.get('MTRL_TEXT') or ''
+            qty = float(item.get('QTY', 1) or 1)
+            unit_price = float(item.get('PRICE', 0) or 0)
+            total = float(item.get('LINEVAL', unit_price * qty))
+
+            node = self.invoice_tree.insert("", "end", values=(
+                "☐",
+                code,
+                descr[:80] + "..." if len(descr) > 80 else descr,
+                f"{qty:g}",
+                f"€{unit_price:.2f}",
+                f"€{total:.2f}"
+            ))
+            self.invoice_checkboxes[node] = False
+
+    def on_invoice_click(self, event):
+        """Toggle invoice checkbox when clicking first column"""
+        region = self.invoice_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        column = self.invoice_tree.identify_column(event.x)
+        item = self.invoice_tree.identify_row(event.y)
+        if column == "#1" and item:
+            current = self.invoice_checkboxes.get(item, False)
+            self.invoice_checkboxes[item] = not current
+            values = list(self.invoice_tree.item(item, "values"))
+            values[0] = "☑" if not current else "☐"
+            self.invoice_tree.item(item, values=values)
+
+    def toggle_all_invoice_items(self):
+        """Toggle all invoice items"""
+        new_state = not any(self.invoice_checkboxes.values()) if self.invoice_checkboxes else True
+        for item in self.invoice_tree.get_children():
+            self.invoice_checkboxes[item] = new_state
+            values = list(self.invoice_tree.item(item, "values"))
+            values[0] = "☑" if new_state else "☐"
+            self.invoice_tree.item(item, values=values)
+
+    def create_selected_invoice_products(self):
+        """Create WooCommerce products from selected invoice lines"""
+        selected_nodes = [i for i, checked in self.invoice_checkboxes.items() if checked]
+        if not selected_nodes:
+            messagebox.showwarning("No selection", "Please select invoice lines to create products")
+            return
+
+        def worker():
+            created = 0
+            for node in selected_nodes:
+                values = self.invoice_tree.item(node, "values")
+                code = values[1]
+                invoice_item = next((i for i in self.invoice_items if str(i.get('CODE') or i.get('MTRL') or '') == code), None)
+                if not invoice_item:
+                    continue
+
+                name = invoice_item.get('MTRL_DESCR') or invoice_item.get('MTRL_TEXT') or code
+                description = invoice_item.get('MTRL_TEXT') or invoice_item.get('MTRL_DESCR') or ''
+                price = float(invoice_item.get('PRICE', 0) or 0)
+
+                product_payload = {
+                    'name': name,
+                    'sku': code,
+                    'regular_price': f"{price:.2f}",
+                    'description': description,
+                    'short_description': description,
+                    'status': 'draft'
+                }
+
+                try:
+                    response = self.woo_client.create_product(product_payload)
+                    created += 1
+                    # Keep local cache in sync minimally
+                    data_store.woo_products.append(response)
+                    data_store.notify_data_changed()
+                    self.db.save_match(
+                        capital_sku=code,
+                        woo_id=response.get('id'),
+                        woo_sku=code,
+                        match_type='created-from-invoice',
+                        confidence=100.0,
+                        matched_by='user'
+                    )
+                    self.log(f"Created product from invoice: {code} -> Woo ID {response.get('id')}")
+                except Exception as e:
+                    self.log(f"Error creating product for {code}: {e}")
+                    self.after(0, lambda c=code, err=e: messagebox.showerror("Create failed", f"{c}: {err}"))
+
+            self.after(0, lambda: messagebox.showinfo("Done", f"Created {created} products"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def pick_invoice_shared_file(self):
+        """Pick a file to append across selected products"""
+        from tkinter import filedialog
+
+        file_path = filedialog.askopenfilename(title="Select file to attach to selected products")
+        if file_path:
+            self.invoice_shared_file = file_path
+            self.invoice_file_label.configure(text=os.path.basename(file_path), text_color="white")
+        else:
+            self.invoice_shared_file = None
+            self.invoice_file_label.configure(text="No file selected", text_color="gray")
+
+    def append_group_note_to_products(self):
+        """Append a note (and optional file) to descriptions of selected Woo products"""
+        selected_nodes = [i for i, checked in self.invoice_checkboxes.items() if checked]
+        if not selected_nodes:
+            messagebox.showwarning("No selection", "Select at least one invoice line to locate Woo products")
+            return
+
+        note = self.group_note_text.get("1.0", "end").strip()
+        if not note and not self.invoice_shared_file:
+            messagebox.showwarning("Nothing to add", "Enter a note or choose a file to append")
+            return
+
+        # Upload file once and reuse
+        uploaded_url = None
+        uploaded_name = None
+        if self.invoice_shared_file:
+            try:
+                media = self.woo_client.upload_media(self.invoice_shared_file)
+                uploaded_url = media.get('source_url')
+                uploaded_name = os.path.basename(self.invoice_shared_file)
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Upload failed", f"Could not upload shared file: {e}"))
+                return
+
+        def worker():
+            updated = 0
+            for node in selected_nodes:
+                values = self.invoice_tree.item(node, "values")
+                code = values[1]
+                product = data_store.get_product_by_sku(code)
+                if not product:
+                    continue
+
+                try:
+                    woo_product = self.woo_client.get_product(product['woo_id'])
+                    existing_desc = woo_product.get('description', '') or product.get('woo_description', '') or ''
+                    additions = []
+                    if note:
+                        additions.append(note)
+                    if uploaded_url:
+                        additions.append(f"Attachment: <a href='{uploaded_url}' target='_blank'>{uploaded_name}</a>")
+
+                    new_desc = existing_desc
+                    if additions:
+                        if new_desc:
+                            new_desc = new_desc + "\n\n" + "\n".join(additions)
+                        else:
+                            new_desc = "\n".join(additions)
+
+                    update_payload = {'description': new_desc}
+                    self.woo_client.update_product(product['woo_id'], update_payload)
+                    data_store.update_woo_product_locally(product['woo_id'], {'description': new_desc})
+                    self.db.record_update(code, 'description', existing_desc, new_desc)
+                    updated += 1
+                except Exception as e:
+                    self.log(f"Failed to append to {code}: {e}")
+
+            self.after(0, lambda: messagebox.showinfo("Updated", f"Appended content to {updated} products"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     # ========================================================================
     # UNMATCHED TAB
     # ========================================================================
@@ -3451,11 +3787,13 @@ class ProductEditorDialog(ctk.CTkToplevel):
     
     def __init__(self, parent, product, woo_client, db):
         super().__init__(parent)
-        
+
         self.product = product
         self.woo_client = woo_client
         self.db = db
-        
+        self.uploaded_images = []
+        self.uploaded_files = []
+
         self.title(f"Edit Product: {product.get('sku', 'Unknown')}")
         self.geometry("700x600")
         self.transient(parent)
@@ -3523,7 +3861,22 @@ class ProductEditorDialog(ctk.CTkToplevel):
         self.desc_text = ctk.CTkTextbox(form_frame, width=400, height=150)
         self.desc_text.grid(row=4, column=1, columnspan=2, padx=10, pady=10)
         self.desc_text.insert("1.0", self.product.get('woo_description', ''))
-        
+
+        # Media uploads
+        ctk.CTkLabel(form_frame, text="Upload Photos:").grid(row=5, column=0, padx=10, pady=10, sticky="w")
+        images_frame = ctk.CTkFrame(form_frame)
+        images_frame.grid(row=5, column=1, columnspan=2, padx=10, pady=10, sticky="w")
+        ctk.CTkButton(images_frame, text="📷 Add Images", command=self.upload_images).pack(side="left", padx=5)
+        self.images_label = ctk.CTkLabel(images_frame, text="No images selected", text_color="gray")
+        self.images_label.pack(side="left", padx=5)
+
+        ctk.CTkLabel(form_frame, text="Attach Files:").grid(row=6, column=0, padx=10, pady=10, sticky="w")
+        files_frame = ctk.CTkFrame(form_frame)
+        files_frame.grid(row=6, column=1, columnspan=2, padx=10, pady=10, sticky="w")
+        ctk.CTkButton(files_frame, text="📎 Add Files", command=self.upload_files).pack(side="left", padx=5)
+        self.files_label = ctk.CTkLabel(files_frame, text="No files selected", text_color="gray")
+        self.files_label.pack(side="left", padx=5)
+
         # Buttons
         btn_frame = ctk.CTkFrame(self)
         btn_frame.pack(fill="x", padx=20, pady=10)
@@ -3571,7 +3924,34 @@ class ProductEditorDialog(ctk.CTkToplevel):
                 self.sale_price_entry.insert(0, f"{sale_price:.2f}")
             except ValueError:
                 messagebox.showerror("Error", "Invalid discount percentage")
-                
+
+    def upload_images(self):
+        """Choose images to upload to the product gallery"""
+        from tkinter import filedialog
+
+        files = filedialog.askopenfilenames(
+            title="Select product photos",
+            filetypes=[("Images", "*.jpg *.jpeg *.png *.gif *.webp"), ("All files", "*.*")]
+        )
+        if files:
+            self.uploaded_images = list(files)
+            self.images_label.configure(text=f"{len(files)} image(s) queued", text_color="white")
+        else:
+            self.uploaded_images = []
+            self.images_label.configure(text="No images selected", text_color="gray")
+
+    def upload_files(self):
+        """Choose non-image files to append to the description"""
+        from tkinter import filedialog
+
+        files = filedialog.askopenfilenames(title="Select files to attach")
+        if files:
+            self.uploaded_files = list(files)
+            self.files_label.configure(text=f"{len(files)} file(s) queued", text_color="white")
+        else:
+            self.uploaded_files = []
+            self.files_label.configure(text="No files selected", text_color="gray")
+
     def save_changes(self):
         """Save changes to WooCommerce"""
         try:
@@ -3593,14 +3973,53 @@ class ProductEditorDialog(ctk.CTkToplevel):
             # Descriptions
             short_desc = self.short_desc_text.get("1.0", "end").strip()
             data['short_description'] = short_desc
-            
+
             description = self.desc_text.get("1.0", "end").strip()
             data['description'] = description
-            
-            # Check if this is a variation
+
             parent_id = self.product.get('parent_id')
             product_id = self.product['woo_id']
-            
+
+            current_product = None
+            try:
+                current_product = self.woo_client.get_product(product_id)
+            except Exception:
+                current_product = None
+
+            # Upload images and preserve existing gallery
+            if self.uploaded_images:
+                existing_images = current_product.get('images', []) if current_product else []
+                new_images = []
+                for img_path in self.uploaded_images:
+                    try:
+                        media = self.woo_client.upload_media(img_path)
+                        if media.get('id'):
+                            new_images.append({'id': media['id']})
+                    except Exception as e:
+                        messagebox.showerror("Upload failed", f"Could not upload {os.path.basename(img_path)}: {e}")
+                if new_images:
+                    data['images'] = existing_images + new_images
+
+            # Upload attachments and append links to description
+            if self.uploaded_files:
+                attachment_links = []
+                for file_path in self.uploaded_files:
+                    try:
+                        media = self.woo_client.upload_media(file_path)
+                        if media.get('source_url'):
+                            attachment_links.append(
+                                f"Attachment: <a href='{media['source_url']}' target='_blank'>{os.path.basename(file_path)}</a>"
+                            )
+                    except Exception as e:
+                        messagebox.showerror("Upload failed", f"Could not upload {os.path.basename(file_path)}: {e}")
+
+                if attachment_links:
+                    existing_desc = data.get('description') or ''
+                    if existing_desc:
+                        data['description'] = existing_desc + "\n\n" + "\n".join(attachment_links)
+                    else:
+                        data['description'] = "\n".join(attachment_links)
+
             # Update WooCommerce using correct endpoint
             if parent_id:
                 # It's a variation - use variation endpoint
