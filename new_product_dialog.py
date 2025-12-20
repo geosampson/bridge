@@ -294,7 +294,7 @@ class NewProductDialog(ctk.CTkToplevel):
             
             if response:
                 # Save match to database
-                self.db.save_match(
+                self.db.save_product_match(
                     capital_sku=self.capital_product.get('CODE', ''),
                     woo_id=response['id'],
                     woo_sku=sku,
