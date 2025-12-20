@@ -2546,7 +2546,7 @@ class BridgeApp(ctk.CTk):
             data_store.matched_products.append(matched_product)
             
             # Save match to database
-            self.db.save_match(
+            self.db.save_product_match(
                 capital_sku=capital_code,
                 woo_id=woo_product['id'],
                 woo_sku=woo_sku,
@@ -4143,5 +4143,4 @@ class UnmatchedCapitalEditorDialog(ctk.CTkToplevel):
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to update: {str(e)}")
-
 
